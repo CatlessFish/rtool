@@ -48,6 +48,7 @@ pub struct RtoolCallback {
     lockdev: bool,
     show_mir_list: Vec<String>,
     show_mir_fuzzy_list: Vec<String>,
+    show_mir_output_file: Option<String>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -58,6 +59,7 @@ impl Default for RtoolCallback {
             lockdev: false,
             show_mir_list: vec![],
             show_mir_fuzzy_list: vec![],
+            show_mir_output_file: None,
         }
     }
 }
@@ -125,6 +127,10 @@ impl RtoolCallback {
     pub fn is_find_mir_enabled(&self) -> bool {
         !self.show_mir_list.is_empty() || !self.show_mir_fuzzy_list.is_empty()
     }
+
+    pub fn set_mir_output_file(&mut self, filename: String) {
+        self.show_mir_output_file = Some(filename);
+    }
 }
 
 /// Start the analysis with the features enabled.
@@ -138,6 +144,12 @@ pub fn start_analyzer(tcx: TyCtxt, callback: RtoolCallback) {
     }
 
     if callback.is_find_mir_enabled() {
-        FindAndShowMir::new(tcx, &callback.show_mir_list, &callback.show_mir_fuzzy_list).start();
+        FindAndShowMir::new(
+            tcx,
+            &callback.show_mir_list,
+            &callback.show_mir_fuzzy_list,
+            callback.show_mir_output_file,
+        )
+        .start();
     }
 }

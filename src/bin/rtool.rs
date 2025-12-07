@@ -26,6 +26,7 @@ enum ArgParserState {
     Ready,
     MirName,
     MirNameExact,
+    OutPath,
 }
 
 fn main() {
@@ -41,6 +42,7 @@ fn main() {
                 "-lockdev" => compiler.enable_lockdev(),
                 "-mir" => state = ArgParserState::MirName,
                 "-mirexact" => state = ArgParserState::MirNameExact,
+                "-outpath" => state = ArgParserState::OutPath,
                 _ => args.push(arg),
             },
             ArgParserState::MirName => {
@@ -57,6 +59,14 @@ fn main() {
                     return;
                 }
                 compiler.enable_show_mir_exact(arg);
+                state = ArgParserState::Ready;
+            }
+            ArgParserState::OutPath => {
+                if arg.starts_with("-") {
+                    rtool_error!("Invalid output path: {}", arg);
+                    return;
+                }
+                compiler.set_mir_output_file(arg);
                 state = ArgParserState::Ready;
             }
         }
