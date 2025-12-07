@@ -27,6 +27,7 @@ fn main() {
     for arg in env::args() {
         match arg.as_str() {
             "-allmir" => compiler.enable_show_mir(),
+            "-lockdev" => compiler.enable_lockdev(),
             _ => args.push(arg),
         }
     }

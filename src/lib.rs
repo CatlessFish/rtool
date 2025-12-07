@@ -34,6 +34,8 @@ use std::sync::Arc;
 
 use analysis::show_mir::ShowMir;
 
+use crate::analysis::dev::LockDevTool;
+
 // Insert rustc arguments at the beginning of the argument list that rtool wants to be
 // set per default, for maximal validation power.
 pub static RTOOL_DEFAULT_ARGS: &[&str] = &["-Zalways-encode-mir", "-Zmir-opt-level=0"];
@@ -43,12 +45,16 @@ pub static RTOOL_DEFAULT_ARGS: &[&str] = &["-Zalways-encode-mir", "-Zmir-opt-lev
 #[derive(Debug, Copy, Clone, Hash)]
 pub struct RtoolCallback {
     show_mir: bool,
+    dev: bool,
 }
 
 #[allow(clippy::derivable_impls)]
 impl Default for RtoolCallback {
     fn default() -> Self {
-        Self { show_mir: false }
+        Self {
+            show_mir: false,
+            dev: false,
+        }
     }
 }
 
@@ -95,11 +101,23 @@ impl RtoolCallback {
     pub fn is_show_mir_enabled(&self) -> bool {
         self.show_mir
     }
+
+    pub fn enable_lockdev(&mut self) {
+        self.dev = true;
+    }
+
+    pub fn is_lockdev_enabled(&self) -> bool {
+        self.dev
+    }
 }
 
 /// Start the analysis with the features enabled.
 pub fn start_analyzer(tcx: TyCtxt, callback: RtoolCallback) {
     if callback.is_show_mir_enabled() {
         ShowMir::new(tcx).start();
+    }
+
+    if callback.is_lockdev_enabled() {
+        LockDevTool::new(tcx).start();
     }
 }
