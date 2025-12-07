@@ -5,7 +5,9 @@ Usage:
 rtool Options:
 
 Analysis:
-    -allmir         show mir
+    -allmir             show mir of every fn
+    -mir fn_name        show mir with def_path_str containing with fn_name
+    -mirexact fn_name   show mir with def_path_str = fn_name
 
 General command: 
     -help:     show help information

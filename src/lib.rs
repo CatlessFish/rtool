@@ -32,9 +32,9 @@ use rustc_session::search_paths::PathKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use analysis::show_mir::ShowMir;
+use analysis::show_mir::ShowAllMir;
 
-use crate::analysis::dev::LockDevTool;
+use crate::analysis::{dev::LockDevTool, show_mir::FindAndShowMir};
 
 // Insert rustc arguments at the beginning of the argument list that rtool wants to be
 // set per default, for maximal validation power.
@@ -42,18 +42,22 @@ pub static RTOOL_DEFAULT_ARGS: &[&str] = &["-Zalways-encode-mir", "-Zmir-opt-lev
 
 /// This is the data structure to handle rtool options as a rustc callback.
 
-#[derive(Debug, Copy, Clone, Hash)]
+#[derive(Debug, Clone, Hash)]
 pub struct RtoolCallback {
-    show_mir: bool,
-    dev: bool,
+    show_all_mir: bool,
+    lockdev: bool,
+    show_mir_list: Vec<String>,
+    show_mir_fuzzy_list: Vec<String>,
 }
 
 #[allow(clippy::derivable_impls)]
 impl Default for RtoolCallback {
     fn default() -> Self {
         Self {
-            show_mir: false,
-            dev: false,
+            show_all_mir: false,
+            lockdev: false,
+            show_mir_list: vec![],
+            show_mir_fuzzy_list: vec![],
         }
     }
 }
@@ -83,7 +87,7 @@ impl Callbacks for RtoolCallback {
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
         rtool_trace!("Execute after_analysis() of compiler callbacks");
         rustc_public::rustc_internal::run(tcx, || {
-            start_analyzer(tcx, *self);
+            start_analyzer(tcx, self.clone());
         })
         .expect("msg");
         rtool_trace!("analysis done");
@@ -93,31 +97,47 @@ impl Callbacks for RtoolCallback {
 
 impl RtoolCallback {
     /// Enable mir display.
-    pub fn enable_show_mir(&mut self) {
-        self.show_mir = true;
+    pub fn enable_show_all_mir(&mut self) {
+        self.show_all_mir = true;
     }
 
-    /// Test if mir display is enabled.
-    pub fn is_show_mir_enabled(&self) -> bool {
-        self.show_mir
+    /// Test if all_mir display is enabled.
+    pub fn is_show_all_mir_enabled(&self) -> bool {
+        self.show_all_mir
     }
 
     pub fn enable_lockdev(&mut self) {
-        self.dev = true;
+        self.lockdev = true;
     }
 
     pub fn is_lockdev_enabled(&self) -> bool {
-        self.dev
+        self.lockdev
+    }
+
+    pub fn enable_show_mir_exact(&mut self, fn_name: String) {
+        self.show_mir_list.push(fn_name);
+    }
+
+    pub fn enable_show_mir_fuzzy(&mut self, fn_name: String) {
+        self.show_mir_fuzzy_list.push(fn_name);
+    }
+
+    pub fn is_find_mir_enabled(&self) -> bool {
+        !self.show_mir_list.is_empty() || !self.show_mir_fuzzy_list.is_empty()
     }
 }
 
 /// Start the analysis with the features enabled.
 pub fn start_analyzer(tcx: TyCtxt, callback: RtoolCallback) {
-    if callback.is_show_mir_enabled() {
-        ShowMir::new(tcx).start();
+    if callback.is_show_all_mir_enabled() {
+        ShowAllMir::new(tcx).start();
     }
 
     if callback.is_lockdev_enabled() {
         LockDevTool::new(tcx).start();
+    }
+
+    if callback.is_find_mir_enabled() {
+        FindAndShowMir::new(tcx, &callback.show_mir_list, &callback.show_mir_fuzzy_list).start();
     }
 }

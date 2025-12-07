@@ -189,12 +189,8 @@ impl Display for DefId {
     }
 }
 
-pub struct ShowMir<'tcx> {
-    pub tcx: TyCtxt<'tcx>,
-}
-
 // #[inline(always)]
-pub fn display_mir(did: DefId, body: &Body) {
+pub fn display_mir_colored(did: DefId, body: &Body) {
     rtool_info!("{}", did.display().color(Color::LightRed));
     rtool_info!("{}", body.local_decls.display().color(Color::Green));
     rtool_info!(
@@ -203,7 +199,18 @@ pub fn display_mir(did: DefId, body: &Body) {
     );
 }
 
-impl<'tcx> ShowMir<'tcx> {
+pub fn display_mir_plain(did: DefId, name: &String, body: &Body) {
+    rtool_info!("{}", did.display().color(Color::LightRed));
+    println!("{}", name);
+    println!("{}", body.local_decls.display());
+    println!("{}", body.basic_blocks.display());
+}
+
+pub struct ShowAllMir<'tcx> {
+    pub tcx: TyCtxt<'tcx>,
+}
+
+impl<'tcx> ShowAllMir<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
         Self { tcx }
     }
@@ -214,7 +221,49 @@ impl<'tcx> ShowMir<'tcx> {
         for each_mir in mir_keys {
             let def_id = each_mir.to_def_id();
             let body = self.tcx.instance_mir(ty::InstanceKind::Item(def_id));
-            display_mir(def_id, body);
+            display_mir_colored(def_id, body);
+        }
+    }
+}
+
+pub struct FindAndShowMir<'tcx, 'a> {
+    pub tcx: TyCtxt<'tcx>,
+    pub exact_fn_names: &'a Vec<String>,
+    pub fuzzy_fn_names: &'a Vec<String>,
+}
+
+impl<'tcx, 'a> FindAndShowMir<'tcx, 'a> {
+    pub fn new(
+        tcx: TyCtxt<'tcx>,
+        exact_fn_names: &'a Vec<String>,
+        fuzzy_fn_names: &'a Vec<String>,
+    ) -> Self {
+        Self {
+            tcx,
+            exact_fn_names,
+            fuzzy_fn_names,
+        }
+    }
+
+    pub fn start(&mut self) {
+        let mir_keys = self.tcx.mir_keys(());
+        rtool_info!("Exact match target: {:?}", { self.exact_fn_names });
+        rtool_info!("Fuzzy match target: {:?}", { self.fuzzy_fn_names });
+        for each_mir in mir_keys {
+            let def_id = each_mir.to_def_id();
+            let fn_name = self.tcx.def_path_str(def_id);
+            // rtool_info!("Checking {}", fn_name);
+            if self.exact_fn_names.contains(&fn_name) {
+                let body = self.tcx.instance_mir(ty::InstanceKind::Item(def_id));
+                display_mir_plain(def_id, &fn_name, body);
+            }
+            if self.fuzzy_fn_names.iter().any(|fuzzy_name| {
+                let real_fn_name = fn_name.split("::").last().unwrap_or("");
+                real_fn_name.contains(fuzzy_name)
+            }) {
+                let body = self.tcx.instance_mir(ty::InstanceKind::Item(def_id));
+                display_mir_plain(def_id, &fn_name, body);
+            }
         }
     }
 }
