@@ -199,11 +199,22 @@ pub fn display_mir_colored(did: DefId, body: &Body) {
     );
 }
 
-pub fn display_mir_plain(did: DefId, name: &String, body: &Body) {
-    rtool_info!("{}", did.display().color(Color::LightRed));
-    println!("{}", name);
+pub fn display_mir_plain(name: &String, body: &Body) {
+    println!("fn {}", name);
     println!("{}", body.local_decls.display());
     println!("{}", body.basic_blocks.display());
+}
+
+pub fn display_bb_source_info<'tcx>(tcx: TyCtxt<'tcx>, body: &Body) {
+    for (idx, bb) in body.basic_blocks.iter_enumerated() {
+        if bb.statements.len() == 0 {
+            continue;
+        }
+        let stmt = &bb.statements[0];
+        let span = stmt.source_info.span;
+        let smap = tcx.sess.source_map();
+        println!("{:?} at {}", idx, smap.span_to_diagnostic_string(span));
+    }
 }
 
 pub struct ShowAllMir<'tcx> {
@@ -255,14 +266,18 @@ impl<'tcx, 'a> FindAndShowMir<'tcx, 'a> {
             // rtool_info!("Checking {}", fn_name);
             if self.exact_fn_names.contains(&fn_name) {
                 let body = self.tcx.instance_mir(ty::InstanceKind::Item(def_id));
-                display_mir_plain(def_id, &fn_name, body);
+                rtool_info!("{}", def_id.display().color(Color::LightRed));
+                display_bb_source_info(self.tcx, body);
+                display_mir_plain(&fn_name, body);
             }
             if self.fuzzy_fn_names.iter().any(|fuzzy_name| {
                 let real_fn_name = fn_name.split("::").last().unwrap_or("");
                 real_fn_name.contains(fuzzy_name)
             }) {
                 let body = self.tcx.instance_mir(ty::InstanceKind::Item(def_id));
-                display_mir_plain(def_id, &fn_name, body);
+                rtool_info!("{}", def_id.display().color(Color::LightRed));
+                display_bb_source_info(self.tcx, body);
+                display_mir_plain(&fn_name, body);
             }
         }
     }
