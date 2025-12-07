@@ -309,10 +309,15 @@ impl<'tcx, 'a> FindAndShowMir<'tcx, 'a> {
         for each_mir in mir_keys {
             let def_id = each_mir.to_def_id();
             let fn_name = self.tcx.def_path_str(def_id);
+            let def_id_str = format!("{:?}", def_id);
             // rtool_info!("Checking {}", fn_name);
-            if self.exact_fn_names.contains(&fn_name) {
+            if self
+                .exact_fn_names
+                .iter()
+                .any(|target| *target == fn_name || def_id_str.contains(target))
+            {
                 let body = self.tcx.instance_mir(ty::InstanceKind::Item(def_id));
-                rtool_info!("{}", def_id.display().color(Color::LightRed));
+                rtool_info!("{}", def_id.display().color(Color::LightBlue));
                 display_bb_source_info(self.tcx, body, &mut out_writer);
                 display_mir_plain(&fn_name, body, &mut out_writer);
             }
@@ -321,7 +326,7 @@ impl<'tcx, 'a> FindAndShowMir<'tcx, 'a> {
                 real_fn_name.contains(fuzzy_name)
             }) {
                 let body = self.tcx.instance_mir(ty::InstanceKind::Item(def_id));
-                rtool_info!("{}", def_id.display().color(Color::LightRed));
+                rtool_info!("{}", def_id.display().color(Color::LightBlue));
                 display_bb_source_info(self.tcx, body, &mut out_writer);
                 display_mir_plain(&fn_name, body, &mut out_writer);
             }
