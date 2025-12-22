@@ -28,7 +28,9 @@ pub enum LockTagItem {
         DefId,
         bool, // true = Enable, false = Disable
         bool, // Nested
+        Span
     ),
+    IsrEntry(DefId, Span)
 }
 
 // 辅助函数：解析 "Name = \"SomeName\"" 格式
@@ -171,6 +173,13 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
             // expect delimited key-value pairs like "(Type = Enable)"
             let tokens = match &attr.args {
                 AttrArgs::Delimited(delim) => delim.tokens.clone(),
+                AttrArgs::Empty => {
+                    if path[1].as_str() == "IsrEntry" {
+                        return Some(LockTagItem::IsrEntry(did, attr.span))
+                    } else {
+                        return None
+                    }
+                }
                 _ => return None,
             };
             match path[1].as_str() {
@@ -199,7 +208,7 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                 "IntrApi" => {
                     // 解析 Type = Enable/Disable, Nested = true/false 格式
                     match parse_intr_api(&tokens) {
-                        Some((typ, nested)) => Some(LockTagItem::IntrApi(did, typ, nested)),
+                        Some((typ, nested)) => Some(LockTagItem::IntrApi(did, typ, nested, attr.span)),
                         None => {
                             rtool_warn!("Failed to parse IntrApi attribute for {:?}", did);
                             None
@@ -221,7 +230,7 @@ impl<'tcx> TagParser<'tcx> {
     }
 
     pub fn run(&self) -> Vec<LockTagItem> {
-        let result = vec![];
+        let mut result = vec![];
         for id in self.tcx.hir_free_items() {
             let item = self.tcx.hir_item(id);
             let did = item.owner_id.def_id.to_def_id();
@@ -234,5 +243,6 @@ impl<'tcx> TagParser<'tcx> {
                 }
             }
         }
+        result
     }
 }
