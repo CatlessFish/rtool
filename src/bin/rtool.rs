@@ -40,6 +40,7 @@ fn main() {
             ArgParserState::Ready => match arg.as_str() {
                 "-allmir" => compiler.enable_show_all_mir(),
                 "-lockdev" => compiler.enable_lockdev(),
+                "-deadlock" => compiler.enable_deadlock(),
                 "-mir" => state = ArgParserState::MirName,
                 "-mirexact" => state = ArgParserState::MirNameExact,
                 "-outpath" => state = ArgParserState::OutPath,

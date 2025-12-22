@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use analysis::show_mir::ShowAllMir;
 
-use crate::analysis::{dev::LockDevTool, show_mir::FindAndShowMir};
+use crate::analysis::{deadlock::DeadlockDetector, dev::LockDevTool, show_mir::FindAndShowMir};
 
 // Insert rustc arguments at the beginning of the argument list that rtool wants to be
 // set per default, for maximal validation power.
@@ -46,6 +46,7 @@ pub static RTOOL_DEFAULT_ARGS: &[&str] = &["-Zalways-encode-mir", "-Zmir-opt-lev
 pub struct RtoolCallback {
     show_all_mir: bool,
     lockdev: bool,
+    deadlock: bool,
     show_mir_list: Vec<String>,
     show_mir_fuzzy_list: Vec<String>,
     show_mir_output_file: Option<String>,
@@ -57,6 +58,7 @@ impl Default for RtoolCallback {
         Self {
             show_all_mir: false,
             lockdev: false,
+            deadlock: false,
             show_mir_list: vec![],
             show_mir_fuzzy_list: vec![],
             show_mir_output_file: None,
@@ -116,6 +118,14 @@ impl RtoolCallback {
         self.lockdev
     }
 
+    pub fn enable_deadlock(&mut self) {
+        self.deadlock = true;
+    }
+
+    pub fn is_deadlock_enabled(&self) -> bool {
+        self.deadlock
+    }
+
     pub fn enable_show_mir_exact(&mut self, fn_name: String) {
         self.show_mir_list.push(fn_name);
     }
@@ -141,6 +151,10 @@ pub fn start_analyzer(tcx: TyCtxt, callback: RtoolCallback) {
 
     if callback.is_lockdev_enabled() {
         LockDevTool::new(tcx).start();
+    }
+
+    if callback.is_deadlock_enabled() {
+        DeadlockDetector::new(tcx).run();
     }
 
     if callback.is_find_mir_enabled() {

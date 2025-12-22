@@ -1,18 +1,18 @@
-pub mod tag_parser;
 pub mod deadlock_reporter;
 pub mod isr_analyzer;
 pub mod ldg_constructor;
 pub mod lock_collector;
 pub mod lockset_analyzer;
+pub mod tag_parser;
 pub mod types;
 
 use crate::analysis::callgraph::default::{CallGraphAnalyzer, CallGraphInfo};
-use crate::analysis::deadlock::tag_parser::{LockTagItem, TagParser};
 use crate::analysis::deadlock::deadlock_reporter::DeadlockReporter;
 use crate::analysis::deadlock::isr_analyzer::IsrAnalyzer;
 use crate::analysis::deadlock::ldg_constructor::LDGConstructor;
 use crate::analysis::deadlock::lock_collector::LockCollector;
 use crate::analysis::deadlock::lockset_analyzer::LockSetAnalyzer;
+use crate::analysis::deadlock::tag_parser::{LockTagItem, TagParser};
 use crate::analysis::deadlock::types::{LockDependencyGraph, interrupt::*, lock::*};
 use crate::rtool_info;
 use rustc_middle::ty::TyCtxt;
@@ -51,7 +51,6 @@ where
             //         InterruptApiType::Disable,
             //     ),
             // ],
-
             parsed_tags: vec![],
             program_lock_info: ProgramLockInfo::new(),
             program_lock_set: ProgramLockSet::new(),
@@ -76,11 +75,7 @@ where
         self.parsed_tags = tag_parser.run();
 
         // 1. Identify ISRs and Analysis InterruptSet
-        let mut isr_analyzer = IsrAnalyzer::new(
-            self.tcx,
-            &self.callgraph,
-            &self.parsed_tags,
-        );
+        let mut isr_analyzer = IsrAnalyzer::new(self.tcx, &self.callgraph, &self.parsed_tags);
         self.program_isr_info = isr_analyzer.run();
         isr_analyzer.print_result();
 

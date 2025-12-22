@@ -1,6 +1,7 @@
 use rustc_ast::token::{Token, TokenKind};
 use rustc_ast::tokenstream::{TokenStream, TokenTree};
 use rustc_hir::{AttrArgs, Attribute, def_id::DefId};
+use rustc_hir::{ImplItemId, ItemId};
 #[allow(unused)]
 use rustc_middle::mir::{Body, Location, Statement, Terminator, TerminatorEdges, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -28,9 +29,9 @@ pub enum LockTagItem {
         DefId,
         bool, // true = Enable, false = Disable
         bool, // Nested
-        Span
+        Span,
     ),
-    IsrEntry(DefId, Span)
+    IsrEntry(DefId, Span),
 }
 
 // 辅助函数：解析 "Name = \"SomeName\"" 格式
@@ -175,9 +176,9 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                 AttrArgs::Delimited(delim) => delim.tokens.clone(),
                 AttrArgs::Empty => {
                     if path[1].as_str() == "IsrEntry" {
-                        return Some(LockTagItem::IsrEntry(did, attr.span))
+                        return Some(LockTagItem::IsrEntry(did, attr.span));
                     } else {
-                        return None
+                        return None;
                     }
                 }
                 _ => return None,
@@ -208,7 +209,9 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                 "IntrApi" => {
                     // 解析 Type = Enable/Disable, Nested = true/false 格式
                     match parse_intr_api(&tokens) {
-                        Some((typ, nested)) => Some(LockTagItem::IntrApi(did, typ, nested, attr.span)),
+                        Some((typ, nested)) => {
+                            Some(LockTagItem::IntrApi(did, typ, nested, attr.span))
+                        }
                         None => {
                             rtool_warn!("Failed to parse IntrApi attribute for {:?}", did);
                             None
@@ -231,18 +234,38 @@ impl<'tcx> TagParser<'tcx> {
 
     pub fn run(&self) -> Vec<LockTagItem> {
         let mut result = vec![];
-        for id in self.tcx.hir_free_items() {
-            let item = self.tcx.hir_item(id);
-            let did = item.owner_id.def_id.to_def_id();
-            let attrs = self.tcx.get_all_attrs(did);
-            for attr in attrs {
-                let tag_item = extract_locktag_item(did, attr);
-                if let Some(item) = tag_item {
-                    rtool_info!("{item:?}");
-                    result.push(item);
-                }
-            }
+        for id in self.tcx.hir_crate_items(()).free_items() {
+            self.process_free_item_id(&mut result, id);
+        }
+        for id in self.tcx.hir_crate_items(()).impl_items() {
+            self.process_impl_item_id(&mut result, id);
         }
         result
+    }
+
+    fn process_free_item_id(&self, res: &mut Vec<LockTagItem>, id: ItemId) {
+        let item = self.tcx.hir_item(id);
+        let did = item.owner_id.def_id.to_def_id();
+        let attrs = self.tcx.get_all_attrs(did);
+        for attr in attrs {
+            let tag_item = extract_locktag_item(did, attr);
+            if let Some(item) = tag_item {
+                rtool_info!("{item:?}");
+                res.push(item);
+            }
+        }
+    }
+
+    fn process_impl_item_id(&self, res: &mut Vec<LockTagItem>, id: ImplItemId) {
+        let item = self.tcx.hir_impl_item(id);
+        let did = item.owner_id.def_id.to_def_id();
+        let attrs = self.tcx.get_all_attrs(did);
+        for attr in attrs {
+            let tag_item = extract_locktag_item(did, attr);
+            if let Some(item) = tag_item {
+                rtool_info!("{item:?}");
+                res.push(item);
+            }
+        }
     }
 }
