@@ -79,7 +79,6 @@ impl<'tcx> Display for StatementKind<'tcx> {
             }
             StatementKind::FakeRead(..) => s += "FakeRead",
             StatementKind::SetDiscriminant { .. } => s += "SetDiscriminant",
-            StatementKind::Deinit(..) => s += "Deinit",
             StatementKind::StorageLive(..) => s += "StorageLive",
             StatementKind::StorageDead(..) => s += "StorageDead",
             StatementKind::Retag(..) => s += "Retag",
@@ -104,7 +103,6 @@ impl<'tcx> Display for Rvalue<'tcx> {
             Rvalue::Repeat(..) => s += "Repeat",
             Rvalue::Ref(..) => s += "Ref",
             Rvalue::ThreadLocalRef(..) => s += "ThreadLocalRef",
-            Rvalue::Len(..) => s += "Len",
             Rvalue::Cast(..) => s += "Cast",
             Rvalue::BinaryOp(..) => s += "BinaryOp",
             Rvalue::NullaryOp(..) => s += "NullaryOp",
