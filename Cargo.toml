@@ -19,6 +19,8 @@ cargo_metadata  = "0.18"
 walkdir = "2"
 wait-timeout = "0.2.0"
 serde_json = "1.0.72"
+petgraph = "0.7.0"
+regex = "1.11.1"
 
 [package.metadata.rust-analyzer]
 rustc_private = true
