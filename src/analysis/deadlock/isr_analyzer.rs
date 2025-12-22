@@ -145,7 +145,7 @@ impl<'tcx, 'a> IsrAnalyzer<'tcx, 'a> {
 
         // 3. Calculate interrupt sets for each function
         // This step is inter-procedural
-        // self.analyze_interrupt_set();
+        self.analyze_interrupt_set();
 
         rtool_info!(
             "Collected {} ISRs. Found {} EnableIrqAPIs and {} DisableIrqAPIs.",
@@ -177,14 +177,14 @@ impl<'tcx, 'a> IsrAnalyzer<'tcx, 'a> {
             let isr_entry = self.tcx.def_path_str(isr_def_id);
 
             // then, find all possible callees
-            // if let Some(callees) = self
-            //     .callgraph
-            //     .get_callees_defid_recursive(&isr_entry.to_string())
-            // {
-            //     for callee in callees {
-            //         isr_funcs.insert(callee);
-            //     }
-            // }
+            if let Some(callees) = self
+                .callgraph
+                .get_callees_defid_recursive(&isr_entry.to_string())
+            {
+                for callee in callees {
+                    isr_funcs.insert(callee);
+                }
+            }
         }
 
         for isr_func in isr_funcs.iter() {
@@ -355,8 +355,9 @@ impl<'tcx, 'a> IsrAnalyzer<'tcx, 'a> {
             count += 1;
         }
         rtool_info!(
-            "==== ISR Analysis Results End ({} ISR entries, {} non-trivial interrupt set functions) ====",
+            "==== ISR Analysis Results End ({} ISR entries, {} ISR funcs, {} non-trivial interrupt set functions) ====",
             self.program_isr_info.isr_entries.len(),
+            self.program_isr_info.isr_funcs.len(),
             count
         );
     }

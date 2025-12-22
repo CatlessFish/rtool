@@ -5,26 +5,23 @@ use rustc_middle::mir::{Body, Local, LocalDecl, Operand, Rvalue, TerminatorKind}
 use rustc_middle::ty::{AdtDef, Ty, TyCtxt, TyKind};
 use std::collections::{HashMap, HashSet};
 
+use crate::analysis::deadlock::tag_parser::LockTagItem;
 use crate::analysis::deadlock::types::lock::*;
 use crate::rtool_info;
 
 struct LockGuardInstanceCollector<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     func_def_id: DefId,
-    lockguard_type_str: &'a Vec<&'a str>,
+    parsed_tags: &'a Vec<LockTagItem>,
     lockguard_instances: HashSet<Local>,
 }
 
 impl<'tcx, 'a> LockGuardInstanceCollector<'tcx, 'a> {
-    pub fn new(
-        tcx: TyCtxt<'tcx>,
-        func_def_id: DefId,
-        lockguard_type_str: &'a Vec<&'a str>,
-    ) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>, func_def_id: DefId, parsed_tags: &'a Vec<LockTagItem>) -> Self {
         Self {
             tcx,
             func_def_id,
-            lockguard_type_str,
+            parsed_tags,
             lockguard_instances: HashSet::new(),
         }
     }
@@ -43,14 +40,11 @@ impl<'tcx, 'a> LockGuardInstanceCollector<'tcx, 'a> {
             if !adt_def.is_struct() {
                 return None;
             }
-            // Match name
-            // FIXME: match DefId maybe?
-            let struct_name = format!("{:?}", adt_def);
-
-            for &type_str in self.lockguard_type_str {
-                if type_str == struct_name {
-                    return Some(());
-                }
+            if self.parsed_tags.iter().any(|tag_item| match tag_item {
+                LockTagItem::LockGuardType(did, _, _) => adt_def.did() == *did,
+                _ => false,
+            }) {
+                return Some(());
             }
         }
         None
@@ -79,15 +73,15 @@ impl<'tcx, 'a> Visitor<'tcx> for LockGuardInstanceCollector<'tcx, 'a> {
 
 struct LockTypeCollector<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
-    lock_type_str: &'a Vec<&'a str>,
+    parsed_tags: &'a Vec<LockTagItem>,
     lock_types: HashSet<AdtDef<'tcx>>,
 }
 
 impl<'tcx, 'a> LockTypeCollector<'tcx, 'a> {
-    pub fn new(tcx: TyCtxt<'tcx>, lock_type_str: &'a Vec<&'a str>) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>, parsed_tags: &'a Vec<LockTagItem>) -> Self {
         Self {
             tcx,
-            lock_type_str,
+            parsed_tags,
             lock_types: HashSet::new(),
         }
     }
@@ -105,14 +99,11 @@ impl<'tcx, 'a> LockTypeCollector<'tcx, 'a> {
             };
             let adt_def = self.tcx.adt_def(def_id);
 
-            // Match name
-            // FIXME: use a more stable approach?
-            let struct_name = format!("{:?}", adt_def);
-            for candidate in self.lock_type_str {
-                if struct_name == *candidate {
-                    self.lock_types.insert(adt_def);
-                    // rtool_info!("Locktype: {:?}", struct_name);
-                }
+            if self.parsed_tags.iter().any(|tag_item| match tag_item {
+                LockTagItem::LockType(did, _, _) => def_id == *did,
+                _ => false,
+            }) {
+                self.lock_types.insert(adt_def);
             }
         }
     }
@@ -374,8 +365,7 @@ impl<'tcx> Visitor<'tcx> for LockMapBuilder<'tcx> {
 
 pub struct LockCollector<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
-    _target_lock_types: &'a Vec<&'a str>,
-    _target_lockguard_types: &'a Vec<&'a str>,
+    parsed_tags: &'a Vec<LockTagItem>,
     lock_types: HashSet<AdtDef<'tcx>>,
     lock_instances: HashSet<LockInstance>,
     lockguard_instances: HashSet<LockGuardInstance>,
@@ -383,15 +373,10 @@ pub struct LockCollector<'tcx, 'a> {
 }
 
 impl<'tcx, 'a> LockCollector<'tcx, 'a> {
-    pub fn new(
-        tcx: TyCtxt<'tcx>,
-        _target_lock_types: &'a Vec<&'a str>,
-        _target_lockguard_types: &'a Vec<&'a str>,
-    ) -> Self {
+    pub fn new(tcx: TyCtxt<'tcx>, parsed_tags: &'a Vec<LockTagItem>) -> Self {
         Self {
             tcx,
-            _target_lock_types,
-            _target_lockguard_types,
+            parsed_tags,
             lock_types: HashSet::new(),
             lock_instances: HashSet::new(),
             lockguard_instances: HashSet::new(),
@@ -408,23 +393,23 @@ impl<'tcx, 'a> LockCollector<'tcx, 'a> {
             };
 
             let mut lockguard_collector =
-                LockGuardInstanceCollector::new(self.tcx, def_id, self._target_lockguard_types);
+                LockGuardInstanceCollector::new(self.tcx, def_id, self.parsed_tags);
             let func_lockguard_instances = lockguard_collector.collect();
 
             // DEBUG
-            if !func_lockguard_instances.is_empty() {
-                rtool_info!(
-                    "LockGuard Found :{} in {:?}",
-                    self.tcx.def_path_str(def_id),
-                    func_lockguard_instances
-                );
-            }
+            // if !func_lockguard_instances.is_empty() {
+            //     rtool_info!(
+            //         "LockGuard Found: {:?} in {:?}",
+            //         func_lockguard_instances,
+            //         self.tcx.def_path_str(def_id),
+            //     );
+            // }
 
             self.lockguard_instances.extend(func_lockguard_instances);
         }
 
         // 2. Collect Lock Types
-        let mut locktype_collector = LockTypeCollector::new(self.tcx, self._target_lock_types);
+        let mut locktype_collector = LockTypeCollector::new(self.tcx, self.parsed_tags);
         self.lock_types = locktype_collector.collect();
 
         // 3. Collect Lock Instances
@@ -466,15 +451,19 @@ impl<'tcx, 'a> LockCollector<'tcx, 'a> {
         for lock in &self.lock_instances {
             rtool_info!("Lock Instance | {}", self.tcx.def_path_str(lock.def_id));
         }
-        for (def_id, func_lockmap) in self.global_lockmap.iter() {
-            for (local, lock) in func_lockmap.iter() {
-                rtool_info!(
-                    "LockGuard | {} # {:?} -> {}",
-                    self.tcx.def_path_str(def_id),
-                    local,
-                    self.tcx.def_path_str(lock.def_id)
-                );
+
+        let mut guard_count = 0;
+        for (_def_id, func_lockmap) in self.global_lockmap.iter() {
+            for (_local, _lock) in func_lockmap.iter() {
+                // rtool_info!(
+                //     "LockGuard | {} # {:?} -> {}",
+                //     self.tcx.def_path_str(def_id),
+                //     local,
+                //     self.tcx.def_path_str(lock.def_id)
+                // );
+                guard_count += 1;
             }
         }
+        rtool_info!("{guard_count} LockGuards Found.");
     }
 }

@@ -17,11 +17,9 @@ use crate::analysis::deadlock::types::{LockDependencyGraph, interrupt::*, lock::
 use crate::rtool_info;
 use rustc_middle::ty::TyCtxt;
 
-pub struct DeadlockDetector<'tcx, 'a> {
+pub struct DeadlockDetector<'tcx> {
     pub tcx: TyCtxt<'tcx>,
     pub callgraph: CallGraphInfo<'tcx>,
-    pub target_lock_types: Vec<&'a str>,
-    pub target_lockguard_types: Vec<&'a str>,
 
     parsed_tags: Vec<LockTagItem>,
     program_lock_info: ProgramLockInfo,
@@ -30,27 +28,11 @@ pub struct DeadlockDetector<'tcx, 'a> {
     lock_dependency_graph: LockDependencyGraph,
 }
 
-impl<'tcx, 'a> DeadlockDetector<'tcx, 'a>
-where
-    'tcx: 'a,
-{
+impl<'tcx> DeadlockDetector<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
         Self {
             tcx,
             callgraph: CallGraphInfo::new(),
-            target_lock_types: vec!["libs::spinlock::SpinLock"],
-            target_lockguard_types: vec!["libs::spinlock::SpinLockGuard"],
-            // target_isr_entries: vec!["arch::x86_64::interrupt::handle::x86_64_do_irq"],
-            // target_interrupt_apis: vec![
-            //     (
-            //         "<arch::x86_64::interrupt::X86_64InterruptArch as exception::InterruptArch>::interrupt_enable",
-            //         InterruptApiType::Enable,
-            //     ),
-            //     (
-            //         "<arch::x86_64::interrupt::X86_64InterruptArch as exception::InterruptArch>::interrupt_disable",
-            //         InterruptApiType::Disable,
-            //     ),
-            // ],
             parsed_tags: vec![],
             program_lock_info: ProgramLockInfo::new(),
             program_lock_set: ProgramLockSet::new(),
@@ -61,7 +43,7 @@ where
 
     /// Start Interrupt-Aware Deadlock Detection
     /// Note: the detection is currently crate-local
-    pub fn run(&'a mut self) {
+    pub fn run(&mut self) {
         rtool_info!("Executing Deadlock Detection");
 
         // Steps:
@@ -75,18 +57,14 @@ where
         self.parsed_tags = tag_parser.run();
 
         // 1. Identify ISRs and Analysis InterruptSet
-        let mut isr_analyzer = IsrAnalyzer::new(self.tcx, &self.callgraph, &self.parsed_tags);
-        self.program_isr_info = isr_analyzer.run();
-        isr_analyzer.print_result();
+        // let mut isr_analyzer = IsrAnalyzer::new(self.tcx, &self.callgraph, &self.parsed_tags);
+        // self.program_isr_info = isr_analyzer.run();
+        // isr_analyzer.print_result();
 
-        // // 2. Collect Locks and LockGuards
-        // let mut lock_collector = LockCollector::new(
-        //     self.tcx,
-        //     &self.target_lock_types,
-        //     &self.target_lockguard_types,
-        // );
-        // self.program_lock_info = lock_collector.collect();
-        // lock_collector.print_result();
+        // 2. Collect Locks and LockGuards
+        let mut lock_collector = LockCollector::new(self.tcx, &self.parsed_tags);
+        self.program_lock_info = lock_collector.collect();
+        lock_collector.print_result();
 
         // // 3. Analysis LockSet
         // let mut lockset_analyzer = LockSetAnalyzer::new(self.tcx, &self.program_lock_info.lockmap);
