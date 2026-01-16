@@ -201,7 +201,7 @@ impl<'tcx, 'a> IsrAnalyzer<'tcx, 'a> {
     /// into `self.enable_interrupt_apis` and `self.disable_interrupt_apis`
     fn collect_interrupt_apis(&mut self) {
         self.parsed_tags.iter().for_each(|tag_item| {
-            if let LockTagItem::IntrApi(did, is_enable , _is_nested , _ ) = tag_item {
+            if let LockTagItem::IntrApi(did, is_enable, _is_nested, _) = tag_item {
                 if *is_enable {
                     self.enable_interrupt_apis.push(did.clone());
                 } else {

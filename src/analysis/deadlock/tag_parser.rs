@@ -28,9 +28,9 @@ pub enum LockTagItem {
         DefId,
         bool, // true = Enable, false = Disable
         bool, // Nested
-        Span
+        Span,
     ),
-    IsrEntry(DefId, Span)
+    IsrEntry(DefId, Span),
 }
 
 // 辅助函数：解析 "Name = \"SomeName\"" 格式
@@ -175,9 +175,9 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                 AttrArgs::Delimited(delim) => delim.tokens.clone(),
                 AttrArgs::Empty => {
                     if path[1].as_str() == "IsrEntry" {
-                        return Some(LockTagItem::IsrEntry(did, attr.span))
+                        return Some(LockTagItem::IsrEntry(did, attr.span));
                     } else {
-                        return None
+                        return None;
                     }
                 }
                 _ => return None,
@@ -208,7 +208,9 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                 "IntrApi" => {
                     // 解析 Type = Enable/Disable, Nested = true/false 格式
                     match parse_intr_api(&tokens) {
-                        Some((typ, nested)) => Some(LockTagItem::IntrApi(did, typ, nested, attr.span)),
+                        Some((typ, nested)) => {
+                            Some(LockTagItem::IntrApi(did, typ, nested, attr.span))
+                        }
                         None => {
                             rtool_warn!("Failed to parse IntrApi attribute for {:?}", did);
                             None
