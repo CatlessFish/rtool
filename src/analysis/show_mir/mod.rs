@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::{rtool_error, rtool_info};
 use colorful::{Color, Colorful};
+use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{
     BasicBlockData, BasicBlocks, Body, LocalDecl, LocalDecls, Operand, Rvalue, Statement,
@@ -295,6 +296,52 @@ impl<'tcx, 'a> FindAndShowMir<'tcx, 'a> {
         }
     }
 
+    /// Get argument count for a function (returns None if MIR not available)
+    fn get_arg_count(&self, def_id: DefId) -> Option<usize> {
+        if !self.tcx.is_mir_available(def_id) {
+            return None;
+        }
+        // Skip const contexts (only applicable to local functions)
+        if let Some(local_def_id) = def_id.as_local() {
+            if self.tcx.hir_body_const_context(local_def_id).is_some() {
+                return None;
+            }
+        }
+        let body = self.tcx.optimized_mir(def_id);
+        Some(body.arg_count)
+    }
+
+    /// Recursively collect all reachable functions with available MIR
+    fn collect_reachable_functions(&self, def_id: DefId, reachable: &mut FxHashSet<DefId>) {
+        // Prevent infinite recursion
+        if reachable.contains(&def_id) {
+            return;
+        }
+
+        // Check if MIR is available
+        if self.get_arg_count(def_id).is_none() {
+            return;
+        }
+
+        // Mark as visited
+        reachable.insert(def_id);
+
+        // Traverse all basic blocks in the MIR body
+        let body = self.tcx.optimized_mir(def_id);
+        for bb_data in body.basic_blocks.iter() {
+            if let Some(terminator) = &bb_data.terminator {
+                if let TerminatorKind::Call { func, .. } = &terminator.kind {
+                    if let Operand::Constant(c) = func {
+                        if let ty::FnDef(callee_def_id, _) = c.ty().kind() {
+                            // Recursively collect called functions
+                            self.collect_reachable_functions(*callee_def_id, reachable);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn start(&mut self) {
         let mut out_writer = match self.output_file {
             Some(ref path) => {
@@ -303,11 +350,21 @@ impl<'tcx, 'a> FindAndShowMir<'tcx, 'a> {
             }
             None => Box::new(io::stdout()) as Box<dyn Write>,
         };
+        // Collect all reachable functions with available MIR
         let mir_keys = self.tcx.mir_keys(());
+        let mut reachable_functions = FxHashSet::default();
+
+        // Start from mir_keys and recursively collect
+        for local_def_id in mir_keys.iter() {
+            self.collect_reachable_functions(local_def_id.to_def_id(), &mut reachable_functions);
+        }
+
+        // Convert to Vec for iteration
+        let reachable_vec: Vec<DefId> = reachable_functions.iter().copied().collect();
+
         rtool_info!("Exact match target: {:?}", { self.exact_fn_names });
         rtool_info!("Fuzzy match target: {:?}", { self.fuzzy_fn_names });
-        for each_mir in mir_keys {
-            let def_id = each_mir.to_def_id();
+        for def_id in reachable_vec {
             let fn_name = self.tcx.def_path_str(def_id);
             let def_id_str = format!("{:?}", def_id);
             // rtool_info!("Checking {}", fn_name);
