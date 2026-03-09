@@ -33,11 +33,11 @@ pub enum LockTagItem {
     IsrEntry(DefId, Span),
 }
 
-// 辅助函数：解析 "Name = \"SomeName\"" 格式
+// Helper function: parse format "Name = \"SomeName\""
 fn parse_name_value(tokens: &TokenStream) -> Option<String> {
     let mut iter = tokens.iter();
 
-    // 查找 Name = "value" 模式
+    // Look for pattern Name = "value"
     while let Some(tree) = iter.next() {
         if let TokenTree::Token(
             Token {
@@ -48,7 +48,7 @@ fn parse_name_value(tokens: &TokenStream) -> Option<String> {
         ) = tree
         {
             if sym.as_str() == "Name" {
-                // 期待 '='
+                // Expect '='
                 if let Some(TokenTree::Token(
                     Token {
                         kind: TokenKind::Eq,
@@ -57,7 +57,7 @@ fn parse_name_value(tokens: &TokenStream) -> Option<String> {
                     _,
                 )) = iter.next()
                 {
-                    // 期待字符串字面量
+                    // Expect string literal
                     if let Some(TokenTree::Token(
                         Token {
                             kind: TokenKind::Literal(lit),
@@ -67,7 +67,7 @@ fn parse_name_value(tokens: &TokenStream) -> Option<String> {
                     )) = iter.next()
                     {
                         let s = lit.symbol.as_str();
-                        // 去除引号
+                        // Remove quotes
                         return Some(s.trim_matches('"').to_string());
                     }
                 }
@@ -77,7 +77,7 @@ fn parse_name_value(tokens: &TokenStream) -> Option<String> {
     None
 }
 
-// 辅助函数：解析 "Type = Enable/Disable, Nested = true/false" 格式
+// Helper function: parse format "Type = Enable/Disable, Nested = true/false"
 fn parse_intr_api(tokens: &TokenStream) -> Option<(bool, bool)> {
     let mut iter = tokens.iter();
     let mut typ_value: Option<bool> = None;
@@ -95,7 +95,7 @@ fn parse_intr_api(tokens: &TokenStream) -> Option<(bool, bool)> {
             let key = sym.as_str();
 
             if key == "Type" {
-                // 期待 '='
+                // Expect '='
                 if let Some(TokenTree::Token(
                     Token {
                         kind: TokenKind::Eq,
@@ -104,7 +104,7 @@ fn parse_intr_api(tokens: &TokenStream) -> Option<(bool, bool)> {
                     _,
                 )) = iter.next()
                 {
-                    // 期待 Enable 或 Disable
+                    // Expect Enable or Disable
                     if let Some(TokenTree::Token(
                         Token {
                             kind: TokenKind::Ident(val_sym, _),
@@ -121,7 +121,7 @@ fn parse_intr_api(tokens: &TokenStream) -> Option<(bool, bool)> {
                     }
                 }
             } else if key == "Nested" {
-                // 期待 '='
+                // Expect '='
                 if let Some(TokenTree::Token(
                     Token {
                         kind: TokenKind::Eq,
@@ -130,7 +130,7 @@ fn parse_intr_api(tokens: &TokenStream) -> Option<(bool, bool)> {
                     _,
                 )) = iter.next()
                 {
-                    // 期待 true 或 false
+                    // Expect true or false
                     if let Some(TokenTree::Token(
                         Token {
                             kind: TokenKind::Ident(val_sym, _),
@@ -150,7 +150,7 @@ fn parse_intr_api(tokens: &TokenStream) -> Option<(bool, bool)> {
         }
     }
 
-    // 两个值都必须存在
+    // Both values must exist
     match (typ_value, nested_value) {
         (Some(t), Some(n)) => Some((t, n)),
         _ => None,
@@ -162,7 +162,7 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
         Attribute::Parsed(_) => None,
         Attribute::Unparsed(box attr) => {
             let path = attr.path.segments.clone().into_vec();
-            // expect ["rapx", "{some_attr}"] at least
+            // expect at least ["rapx", "{some_attr}"]
             if path.len() < 2 {
                 return None;
             };
@@ -184,7 +184,7 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
             };
             match path[1].as_str() {
                 "LockType" => {
-                    // 解析 Name = "SpinLock" 格式
+                    // Parse format Name = "SpinLock"
                     let name = parse_name_value(&tokens);
                     match name {
                         Some(n) => Some(LockTagItem::LockType(did, n, attr.span)),
@@ -195,7 +195,7 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                     }
                 }
                 "LockGuardType" => {
-                    // 解析 Name = "SpinLockGuard" 格式
+                    // Parse format Name = "SpinLockGuard"
                     let name = parse_name_value(&tokens);
                     match name {
                         Some(n) => Some(LockTagItem::LockGuardType(did, n, attr.span)),
@@ -206,7 +206,7 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                     }
                 }
                 "IntrApi" => {
-                    // 解析 Type = Enable/Disable, Nested = true/false 格式
+                    // Parse format Type = Enable/Disable, Nested = true/false
                     match parse_intr_api(&tokens) {
                         Some((typ, nested)) => {
                             Some(LockTagItem::IntrApi(did, typ, nested, attr.span))
