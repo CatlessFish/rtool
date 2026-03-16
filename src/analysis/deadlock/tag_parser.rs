@@ -1,36 +1,132 @@
 use rustc_ast::token::{Token, TokenKind};
 use rustc_ast::tokenstream::{TokenStream, TokenTree};
-use rustc_hir::{AttrArgs, Attribute, def_id::DefId};
-#[allow(unused)]
-use rustc_middle::mir::{Body, Location, Statement, Terminator, TerminatorEdges, TerminatorKind};
+use rustc_hir::{AttrArgs, Attribute, BodyOwnerKind, def::DefKind, def_id::DefId};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
-use crate::{rtool_info, rtool_warn};
+use crate::analysis::utils::def_path::def_path_def_ids;
 
 pub struct TagParser<'tcx> {
     tcx: TyCtxt<'tcx>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum LockTagItem {
-    LockType(
-        DefId,
-        String, // Name
-        Span,
-    ),
-    LockGuardType(
-        DefId,
-        String, // Name
-        Span,
-    ),
+    LockType(DefId, String, SerializableSpan),
+    LockGuardType(DefId, String, SerializableSpan),
     IntrApi(
         DefId,
         bool, // true = Enable, false = Disable
         bool, // Nested
-        Span,
+        SerializableSpan,
     ),
-    IsrEntry(DefId, Span),
+    IsrEntry(DefId, SerializableSpan),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
+pub struct SerializableDefId {
+    pub crate_name: String,
+    pub def_path: String,
+}
+
+impl SerializableDefId {
+    pub fn from_def_id(tcx: TyCtxt<'_>, def_id: DefId) -> Self {
+        let crate_num = def_id.krate;
+        let crate_name = tcx.crate_name(crate_num).as_str().to_string();
+        SerializableDefId {
+            def_path: format!("{}::{}", crate_name, tcx.def_path_str(def_id)),
+            crate_name,
+        }
+    }
+
+    pub fn resolve(&self, tcx: TyCtxt<'_>) -> Option<DefId> {
+        let path: Vec<&str> = self.def_path.split("::").collect();
+        def_path_def_ids(&tcx, &path).last()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SerializableSpan {
+    pub lo: u32,
+    pub hi: u32,
+}
+
+impl From<Span> for SerializableSpan {
+    fn from(span: Span) -> Self {
+        SerializableSpan {
+            lo: span.lo().0,
+            hi: span.hi().0,
+        }
+    }
+}
+
+impl From<SerializableSpan> for Span {
+    fn from(span: SerializableSpan) -> Self {
+        use rustc_span::BytePos;
+        Span::with_root_ctxt(BytePos(span.lo), BytePos(span.hi))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+enum SerializableLockTagItem {
+    LockType(SerializableDefId, String, SerializableSpan),
+    LockGuardType(SerializableDefId, String, SerializableSpan),
+    IntrApi(SerializableDefId, bool, bool, SerializableSpan),
+    IsrEntry(SerializableDefId, SerializableSpan),
+}
+
+impl SerializableLockTagItem {
+    fn from_runtime(tcx: TyCtxt<'_>, item: &LockTagItem) -> Self {
+        match item {
+            LockTagItem::LockType(def_id, name, span) => Self::LockType(
+                SerializableDefId::from_def_id(tcx, *def_id),
+                name.clone(),
+                span.clone(),
+            ),
+            LockTagItem::LockGuardType(def_id, name, span) => Self::LockGuardType(
+                SerializableDefId::from_def_id(tcx, *def_id),
+                name.clone(),
+                span.clone(),
+            ),
+            LockTagItem::IntrApi(def_id, is_enable, is_nested, span) => Self::IntrApi(
+                SerializableDefId::from_def_id(tcx, *def_id),
+                *is_enable,
+                *is_nested,
+                span.clone(),
+            ),
+            LockTagItem::IsrEntry(def_id, span) => {
+                Self::IsrEntry(SerializableDefId::from_def_id(tcx, *def_id), span.clone())
+            }
+        }
+    }
+
+    fn resolve(&self, tcx: TyCtxt<'_>) -> Option<LockTagItem> {
+        match self {
+            Self::LockType(def_id, name, span) => def_id
+                .resolve(tcx)
+                .map(|did| LockTagItem::LockType(did, name.clone(), span.clone())),
+            Self::LockGuardType(def_id, name, span) => def_id
+                .resolve(tcx)
+                .map(|did| LockTagItem::LockGuardType(did, name.clone(), span.clone())),
+            Self::IntrApi(def_id, is_enable, is_nested, span) => def_id
+                .resolve(tcx)
+                .map(|did| LockTagItem::IntrApi(did, *is_enable, *is_nested, span.clone())),
+            Self::IsrEntry(def_id, span) => def_id
+                .resolve(tcx)
+                .map(|did| LockTagItem::IsrEntry(did, span.clone())),
+        }
+    }
+
+    fn def_id(&self) -> &SerializableDefId {
+        match self {
+            Self::LockType(def_id, ..)
+            | Self::LockGuardType(def_id, ..)
+            | Self::IntrApi(def_id, ..)
+            | Self::IsrEntry(def_id, ..) => def_id,
+        }
+    }
 }
 
 // Helper function: parse format "Name = \"SomeName\""
@@ -175,7 +271,7 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                 AttrArgs::Delimited(delim) => delim.tokens.clone(),
                 AttrArgs::Empty => {
                     if path[1].as_str() == "IsrEntry" {
-                        return Some(LockTagItem::IsrEntry(did, attr.span));
+                        return Some(LockTagItem::IsrEntry(did, attr.span.into()));
                     } else {
                         return None;
                     }
@@ -184,41 +280,39 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
             };
             match path[1].as_str() {
                 "LockType" => {
-                    // Parse format Name = "SpinLock"
                     let name = parse_name_value(&tokens);
                     match name {
-                        Some(n) => Some(LockTagItem::LockType(did, n, attr.span)),
+                        Some(n) => Some(LockTagItem::LockType(did, n, attr.span.into())),
                         None => {
-                            rtool_warn!("Failed to parse LockType attribute for {:?}", did);
+                            crate::rtool_warn!("Failed to parse LockType attribute for {:?}", did);
                             None
                         }
                     }
                 }
                 "LockGuardType" => {
-                    // Parse format Name = "SpinLockGuard"
                     let name = parse_name_value(&tokens);
                     match name {
-                        Some(n) => Some(LockTagItem::LockGuardType(did, n, attr.span)),
+                        Some(n) => Some(LockTagItem::LockGuardType(did, n, attr.span.into())),
                         None => {
-                            rtool_warn!("Failed to parse LockGuardType attribute for {:?}", did);
+                            crate::rtool_warn!(
+                                "Failed to parse LockGuardType attribute for {:?}",
+                                did
+                            );
                             None
                         }
                     }
                 }
-                "IntrApi" => {
-                    // Parse format Type = Enable/Disable, Nested = true/false
-                    match parse_intr_api(&tokens) {
-                        Some((typ, nested)) => {
-                            Some(LockTagItem::IntrApi(did, typ, nested, attr.span))
-                        }
-                        None => {
-                            rtool_warn!("Failed to parse IntrApi attribute for {:?}", did);
-                            None
-                        }
+                "IntrApi" => match parse_intr_api(&tokens) {
+                    Some((typ, nested)) => {
+                        Some(LockTagItem::IntrApi(did, typ, nested, attr.span.into()))
                     }
-                }
+                    None => {
+                            crate::rtool_warn!("Failed to parse IntrApi attribute for {:?}", did);
+                        None
+                    }
+                },
                 _ => {
-                    rtool_warn!("Unsupported Lock Tag: {}", path[1].as_str());
+                    crate::rtool_warn!("Unsupported Lock Tag: {}", path[1].as_str());
                     None
                 }
             }
@@ -231,20 +325,157 @@ impl<'tcx> TagParser<'tcx> {
         Self { tcx }
     }
 
-    pub fn run(&self) -> Vec<LockTagItem> {
-        let mut result = vec![];
-        for id in self.tcx.hir_free_items() {
-            let item = self.tcx.hir_item(id);
-            let did = item.owner_id.def_id.to_def_id();
-            let attrs = self.tcx.get_all_attrs(did);
-            for attr in attrs {
-                let tag_item = extract_locktag_item(did, attr);
-                if let Some(item) = tag_item {
-                    rtool_info!("{item:?}");
-                    result.push(item);
+    fn collect_tags_for_def_id<F>(&self, did: DefId, filter: F) -> Vec<LockTagItem>
+    where
+        F: Fn(&LockTagItem) -> bool,
+    {
+        self.tcx
+            .get_all_attrs(did)
+            .iter()
+            .filter_map(|attr| extract_locktag_item(did, attr))
+            .filter(filter)
+            .collect()
+    }
+
+    pub fn load_analyze_save(
+        &self,
+        load_path: Option<&str>,
+        save_path: Option<&str>,
+    ) -> Vec<LockTagItem> {
+        let mut persisted_tags = if let Some(load_path) = load_path {
+            match std::fs::read_to_string(load_path) {
+                Ok(content) => match serde_json::from_str::<Vec<SerializableLockTagItem>>(&content)
+                {
+                    Ok(loaded) => {
+                        crate::rtool_info!(
+                            "Loaded {} serialized tags from {}",
+                            loaded.len(),
+                            load_path
+                        );
+                        loaded
+                    }
+                    Err(e) => {
+                        crate::rtool_warn!("Failed to parse tags from {}: {}", load_path, e);
+                        vec![]
+                    }
+                },
+                Err(e) => {
+                    crate::rtool_warn!("Failed to read tag file {}: {}", load_path, e);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        };
+
+        let mut unresolved_cached_tags = 0;
+        let mut reported_unresolved_paths: HashSet<String> = HashSet::new();
+        let mut tags: Vec<LockTagItem> = persisted_tags
+            .iter()
+            .filter_map(|tag| match tag.resolve(self.tcx) {
+                Some(tag) => Some(tag),
+                None => {
+                    unresolved_cached_tags += 1;
+                    let def_id = tag.def_id();
+                    if reported_unresolved_paths.insert(def_id.def_path.clone()) {
+                        crate::rtool_warn!(
+                            "Failed to resolve cached item {} from crate {} in current session",
+                            def_id.def_path,
+                            def_id.crate_name,
+                        );
+                    }
+                    crate::rtool_warn!(
+                        "Skipping cached tag for item {} from crate {} because it is unavailable in the current session",
+                        def_id.def_path,
+                        def_id.crate_name,
+                    );
+                    None
+                }
+            })
+            .collect();
+        if unresolved_cached_tags > 0 {
+            crate::rtool_warn!(
+                "Skipped {} cached tags that could not be resolved in this compilation session",
+                unresolved_cached_tags
+            );
+        }
+
+        let analyzed_tags = self.analyze_current_crate();
+        persisted_tags.extend(
+            analyzed_tags
+                .iter()
+                .map(|tag| SerializableLockTagItem::from_runtime(self.tcx, tag)),
+        );
+        tags.extend(analyzed_tags);
+
+        if let Some(save_path) = save_path {
+            match serde_json::to_string_pretty(&persisted_tags) {
+                Ok(json) => {
+                    if let Err(e) = std::fs::write(save_path, json) {
+                        crate::rtool_warn!("Failed to save tags to {}: {}", save_path, e);
+                    } else {
+                        crate::rtool_info!("Saved tags to {}", save_path);
+                    }
+                }
+                Err(e) => {
+                    crate::rtool_warn!("Failed to serialize tags to JSON: {}", e);
                 }
             }
         }
+        tags
+    }
+
+    fn analyze_current_crate(&self) -> Vec<LockTagItem> {
+        let mut result = vec![];
+
+        for id in self.tcx.hir_free_items() {
+            let item = self.tcx.hir_item(id);
+            let did = item.owner_id.def_id.to_def_id();
+            result.extend(self.collect_tags_for_def_id(did, |tag| {
+                matches!(
+                    tag,
+                    LockTagItem::LockType(..) | LockTagItem::LockGuardType(..)
+                )
+            }));
+        }
+
+        for local_def_id in self.tcx.hir_body_owners() {
+            if !matches!(
+                self.tcx.hir_body_owner_kind(local_def_id),
+                BodyOwnerKind::Fn
+            ) {
+                continue;
+            }
+
+            let did = local_def_id.to_def_id();
+            if matches!(self.tcx.def_kind(did), DefKind::Closure) {
+                continue;
+            }
+
+            result.extend(self.collect_tags_for_def_id(did, |tag| {
+                matches!(tag, LockTagItem::IntrApi(..) | LockTagItem::IsrEntry(..))
+            }));
+        }
+
+        let mut lock_type_count = 0;
+        let mut lock_guard_type_count = 0;
+        let mut intr_api_count = 0;
+        let mut isr_entry_count = 0;
+        for item in &result {
+            match item {
+                LockTagItem::LockType(..) => lock_type_count += 1,
+                LockTagItem::LockGuardType(..) => lock_guard_type_count += 1,
+                LockTagItem::IntrApi(..) => intr_api_count += 1,
+                LockTagItem::IsrEntry(..) => isr_entry_count += 1,
+            }
+        }
+        crate::rtool_info!(
+            "Tags found: LockType = {}, LockGuardType = {}, IntrApi = {}, IsrEntry = {}",
+            lock_type_count,
+            lock_guard_type_count,
+            intr_api_count,
+            isr_entry_count
+        );
         result
     }
 }

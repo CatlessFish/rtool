@@ -10,27 +10,71 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{BasicBlock, Local, Location};
 use rustc_mir_dataflow::fmt::DebugWithContext;
 use rustc_span::Span;
+use std::hash::{Hash, Hasher};
 
 use crate::analysis::deadlock::types::lock::LockInstance;
 
 pub mod lock {
     use super::*;
 
-    /// A `LockInstance` is a `static` variable, with Lock type
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    pub struct LockInstance {
-        /// The def_id of the static item
-        pub def_id: DefId,
+    pub enum LockRoot {
+        Static { def_id: DefId, name: String },
+        TypeBucket { type_name: String },
+    }
 
-        /// Source span
+    impl Display for LockRoot {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Static { name, .. } => write!(f, "{name}"),
+                Self::TypeBucket { type_name } => write!(f, "{type_name}"),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct FieldPathElem {
+        pub index: usize,
+        pub name: String,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct LockInstance {
+        pub root: LockRoot,
+        pub field_path: Vec<FieldPathElem>,
         pub span: Span,
-        // TODO: lock_type
+    }
+
+    impl PartialEq for LockInstance {
+        fn eq(&self, other: &Self) -> bool {
+            self.root == other.root && self.field_path == other.field_path
+        }
+    }
+
+    impl Eq for LockInstance {}
+
+    impl Hash for LockInstance {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.root.hash(state);
+            self.field_path.hash(state);
+        }
     }
 
     impl Display for LockInstance {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-            write!(f, "{:?}", self.def_id)
+            write!(f, "{}", self.root)?;
+            for elem in &self.field_path {
+                write!(f, ".{}", elem.name)?;
+            }
+            Ok(())
         }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub enum LockGuardType {
+        SpinLockLocalDisabled,
+        SpinLockPreemptDisabled,
+        Default,
     }
 
     /// A `LockGuardInstance` is a `Local` inside a function, with LockGuard type
@@ -38,10 +82,11 @@ pub mod lock {
     pub struct LockGuardInstance {
         pub func_def_id: DefId,
         pub local: Local,
+        pub guard_type: LockGuardType,
     }
 
-    /// Map from `Local` LockGuard to LockInstance of a function
-    pub type LocalLockMap = HashMap<Local, LockInstance>;
+    /// Map from `Local` LockGuard to possible LockInstances of a function
+    pub type LocalLockMap = HashMap<Local, HashSet<LockInstance>>;
 
     /// Each function's `LocalLockMap`
     pub type GlobalLockMap = HashMap<DefId, LocalLockMap>;
@@ -398,11 +443,11 @@ impl Display for LockDependencyEdge {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Type: {:?}, Old: {:?} @ {:?}, New: {:?} @ {:?}",
+            "Type: {:?}, Old: {} @ {:?}, New: {} @ {:?}",
             self.edge_type,
-            self.new_lock_site.lock.def_id,
+            self.new_lock_site.lock,
             self.new_lock_site.site.caller_def_id,
-            self.old_lock_site.lock.def_id,
+            self.old_lock_site.lock,
             self.old_lock_site.site.caller_def_id,
         )
     }

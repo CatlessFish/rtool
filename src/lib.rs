@@ -2,8 +2,11 @@
 #![feature(box_patterns)]
 #![feature(macro_metavar_expr_concat)]
 
-pub mod analysis;
+#[macro_use]
 pub mod utils;
+pub mod analysis;
+pub mod cli;
+pub mod help;
 extern crate rustc_abi;
 extern crate rustc_ast;
 extern crate rustc_data_structures;
@@ -34,7 +37,10 @@ use std::sync::Arc;
 
 use analysis::show_mir::ShowAllMir;
 
-use crate::analysis::{dev::LockDevTool, show_mir::FindAndShowMir};
+use crate::{
+    analysis::{deadlock::DeadlockDetector, dev::LockDevTool, show_mir::FindAndShowMir},
+    cli::{AnalysisKind, Commands, RtoolArgs},
+};
 
 // Insert rustc arguments at the beginning of the argument list that rtool wants to be
 // set per default, for maximal validation power.
@@ -42,26 +48,9 @@ pub static RTOOL_DEFAULT_ARGS: &[&str] = &["-Zalways-encode-mir", "-Zmir-opt-lev
 
 /// This is the data structure to handle rtool options as a rustc callback.
 
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone)]
 pub struct RtoolCallback {
-    show_all_mir: bool,
-    lockdev: bool,
-    show_mir_list: Vec<String>,
-    show_mir_fuzzy_list: Vec<String>,
-    show_mir_output_file: Option<String>,
-}
-
-#[allow(clippy::derivable_impls)]
-impl Default for RtoolCallback {
-    fn default() -> Self {
-        Self {
-            show_all_mir: false,
-            lockdev: false,
-            show_mir_list: vec![],
-            show_mir_fuzzy_list: vec![],
-            show_mir_output_file: None,
-        }
-    }
+    args: RtoolArgs,
 }
 
 impl Callbacks for RtoolCallback {
@@ -98,58 +87,37 @@ impl Callbacks for RtoolCallback {
 }
 
 impl RtoolCallback {
-    /// Enable mir display.
-    pub fn enable_show_all_mir(&mut self) {
-        self.show_all_mir = true;
-    }
-
-    /// Test if all_mir display is enabled.
-    pub fn is_show_all_mir_enabled(&self) -> bool {
-        self.show_all_mir
-    }
-
-    pub fn enable_lockdev(&mut self) {
-        self.lockdev = true;
-    }
-
-    pub fn is_lockdev_enabled(&self) -> bool {
-        self.lockdev
-    }
-
-    pub fn enable_show_mir_exact(&mut self, fn_name: String) {
-        self.show_mir_list.push(fn_name);
-    }
-
-    pub fn enable_show_mir_fuzzy(&mut self, fn_name: String) {
-        self.show_mir_fuzzy_list.push(fn_name);
-    }
-
-    pub fn is_find_mir_enabled(&self) -> bool {
-        !self.show_mir_list.is_empty() || !self.show_mir_fuzzy_list.is_empty()
-    }
-
-    pub fn set_mir_output_file(&mut self, filename: String) {
-        self.show_mir_output_file = Some(filename);
+    pub fn new(args: RtoolArgs) -> Self {
+        Self { args }
     }
 }
 
 /// Start the analysis with the features enabled.
 pub fn start_analyzer(tcx: TyCtxt, callback: RtoolCallback) {
-    if callback.is_show_all_mir_enabled() {
-        ShowAllMir::new(tcx).start();
-    }
-
-    if callback.is_lockdev_enabled() {
-        LockDevTool::new(tcx).start();
-    }
-
-    if callback.is_find_mir_enabled() {
-        FindAndShowMir::new(
-            tcx,
-            &callback.show_mir_list,
-            &callback.show_mir_fuzzy_list,
-            callback.show_mir_output_file,
-        )
-        .start();
+    match &callback.args.command {
+        Commands::Analyze { kind } => match kind {
+            AnalysisKind::Deadlock {
+                save_tags,
+                load_tags,
+            } => {
+                DeadlockDetector::new(tcx)
+                    .run_with_tag_io(save_tags.as_deref(), load_tags.as_deref());
+            }
+            AnalysisKind::Dev => {
+                LockDevTool::new(tcx).start();
+            }
+            AnalysisKind::Mir {
+                all,
+                exact,
+                fuzzy,
+                outpath,
+            } => {
+                if *all || (exact.is_empty() && fuzzy.is_empty()) {
+                    ShowAllMir::new(tcx).start();
+                } else {
+                    FindAndShowMir::new(tcx, exact, fuzzy, outpath.clone()).start();
+                }
+            }
+        },
     }
 }

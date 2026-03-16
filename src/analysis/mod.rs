@@ -2,6 +2,7 @@ pub mod callgraph;
 pub mod deadlock;
 pub mod dev;
 pub mod show_mir;
+pub mod utils;
 
 pub trait Analysis {
     /// Return the name of the analysis.

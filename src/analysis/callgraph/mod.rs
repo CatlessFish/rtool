@@ -12,6 +12,38 @@ pub struct CallGraph {
     pub fn_calls: HashMap<DefId, Vec<DefId>>, // caller_id -> Vec<(callee_id)>
 }
 
+impl CallGraph {
+    pub fn new() -> Self {
+        Self {
+            fn_calls: HashMap::new(),
+        }
+    }
+
+    pub fn get_callees(&self, caller_def_id: DefId) -> Vec<DefId> {
+        self.fn_calls
+            .get(&caller_def_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn get_callees_recursive(&self, caller_def_id: DefId) -> Vec<DefId> {
+        let mut visited = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        let mut stack = vec![caller_def_id];
+        while let Some(current) = stack.pop() {
+            if let Some(callees) = self.fn_calls.get(&current) {
+                for callee in callees {
+                    if visited.insert(*callee) {
+                        result.push(*callee);
+                        stack.push(*callee);
+                    }
+                }
+            }
+        }
+        result
+    }
+}
+
 pub struct CallGraphDisplay<'a, 'tcx> {
     pub graph: &'a CallGraph,
     pub tcx: TyCtxt<'tcx>,

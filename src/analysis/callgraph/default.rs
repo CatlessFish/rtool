@@ -203,6 +203,52 @@ impl<'tcx> CallGraphInfo<'tcx> {
         }
     }
 
+    /// Get all direct callees of a function by DefId.
+    pub fn get_callees(&self, caller_def_id: DefId) -> Vec<DefId> {
+        let Some((&caller_id, _)) = self
+            .functions
+            .iter()
+            .find(|(_, node)| node.get_def_id() == caller_def_id)
+        else {
+            return vec![];
+        };
+
+        self.fn_calls
+            .get(&caller_id)
+            .into_iter()
+            .flat_map(|callees| callees.iter())
+            .filter_map(|(id, _)| self.functions.get(id).map(Node::get_def_id))
+            .collect()
+    }
+
+    /// Get all recursively reachable callees of a function by DefId.
+    pub fn get_callees_recursive(&self, caller_def_id: DefId) -> Vec<DefId> {
+        let Some((&caller_id, _)) = self
+            .functions
+            .iter()
+            .find(|(_, node)| node.get_def_id() == caller_def_id)
+        else {
+            return vec![];
+        };
+
+        let mut result = Vec::new();
+        let mut visited = HashSet::new();
+        let mut stack = vec![caller_id];
+        while let Some(current_id) = stack.pop() {
+            if let Some(callee_ids) = self.fn_calls.get(&current_id) {
+                for (id, _terminator) in callee_ids {
+                    if visited.insert(*id) {
+                        if let Some(callee_node) = self.functions.get(id) {
+                            result.push(callee_node.get_def_id());
+                            stack.push(*id);
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
     /// Recursively get all callees of a caller
     /// Return a vector of callees, by (partly) topological order, WITHOUT considering SCCs
     pub fn get_callees_defid_recursive(&self, caller_def_path: &String) -> Option<Vec<DefId>> {

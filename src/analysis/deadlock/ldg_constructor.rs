@@ -1,3 +1,4 @@
+use petgraph::dot::{Config, Dot};
 use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use rustc_hir::BodyOwnerKind;
 use rustc_hir::def_id::DefId;
@@ -6,15 +7,11 @@ use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 use std::collections::HashSet;
 
-use petgraph::dot::{Config, Dot};
-
 use crate::analysis::deadlock::types::{interrupt::*, lock::*, *};
 use crate::rtool_info;
 
 fn extract_locksite_pairs(
-    // The lockset BEFORE function call / interrupt
     callsite_lockset: &LockSet,
-    // The lock_operations of callee / ISR
     callee_lock_operations: &HashSet<LockSite>,
 ) -> HashSet<(LockSite, LockSite)> {
     let mut result = HashSet::new();
@@ -42,7 +39,6 @@ fn extract_locksite_pairs(
     result
 }
 
-/// Corresponding to an edge new_lock -- @CallSite --> old_lock
 type LockSitePairsWithCallSite = HashSet<(LockSite, LockSite, CallSite)>;
 
 struct NormalEdgeCollector<'tcx, 'a> {
@@ -66,14 +62,7 @@ impl<'tcx, 'a> NormalEdgeCollector<'tcx, 'a> {
         }
     }
 
-    /// Analyze function foo() and every callee bar() in foo()
     pub fn collect(mut self) -> LockSitePairsWithCallSite {
-        // 1. handle function calls
-        // FIXME: Do we need this?
-        // let body: &Body = self.tcx.optimized_mir(self.caller_def_id);
-        // self.visit_body(body);
-
-        // 2. handle lock operations in this function
         if let Some(func_info) = self.program_lock_set.get(&self.caller_def_id) {
             for new_lock_site in func_info.lock_operations.iter() {
                 if let Some(current_lockset) = func_info
@@ -117,42 +106,29 @@ impl<'tcx, 'a> Visitor<'tcx> for NormalEdgeCollector<'tcx, 'a> {
         terminator: &rustc_middle::mir::Terminator<'tcx>,
         location: rustc_middle::mir::Location,
     ) {
-        // The lockset at callsite
         let callsite_lockset = match self.program_lock_set.get(&self.caller_def_id) {
-            Some(func_lockset) => {
-                // This must be Some since we have analyzed that function
-                func_lockset.pre_bb_locksets.get(&location.block).unwrap()
-            }
+            Some(func_lockset) => func_lockset.pre_bb_locksets.get(&location.block).unwrap(),
             None => return,
         };
-        match &terminator.kind {
-            TerminatorKind::Call { func, .. } => {
-                if let Some((callee_def_id, _)) = func.const_fn_def() {
-                    if let Some(callee_func_info) = self.program_lock_set.get(&callee_def_id) {
-                        self.locksite_pairs.extend(
-                            extract_locksite_pairs(
-                                callsite_lockset,
-                                &callee_func_info.lock_operations,
-                            )
+        if let TerminatorKind::Call { func, .. } = &terminator.kind {
+            if let Some((callee_def_id, _)) = func.const_fn_def() {
+                if let Some(callee_func_info) = self.program_lock_set.get(&callee_def_id) {
+                    self.locksite_pairs.extend(
+                        extract_locksite_pairs(callsite_lockset, &callee_func_info.lock_operations)
                             .iter()
-                            .map(
-                                // Append CallSite information
-                                |pair| {
-                                    (
-                                        pair.0.clone(),
-                                        pair.1.clone(),
-                                        CallSite {
-                                            caller_def_id: self.caller_def_id,
-                                            location,
-                                        },
-                                    )
-                                },
-                            ),
-                        );
-                    }
+                            .map(|pair| {
+                                (
+                                    pair.0.clone(),
+                                    pair.1.clone(),
+                                    CallSite {
+                                        caller_def_id: self.caller_def_id,
+                                        location,
+                                    },
+                                )
+                            }),
+                    );
                 }
             }
-            _ => {}
         }
     }
 }
@@ -181,7 +157,6 @@ impl<'tcx, 'a> InterruptEdgeCollector<'tcx, 'a> {
         }
     }
 
-    /// Analyze any ISR that may interrupt this function
     pub fn collect(mut self) -> LockSitePairsWithCallSite {
         let body: &Body = self.tcx.optimized_mir(self.func_def_id);
         self.visit_body(body);
@@ -195,29 +170,19 @@ impl<'tcx, 'a> Visitor<'tcx> for InterruptEdgeCollector<'tcx, 'a> {
         _terminator: &rustc_middle::mir::Terminator<'tcx>,
         location: rustc_middle::mir::Location,
     ) {
-        // Simulates an interrupt at each terminator
-        // 1. Check irq state
         let irq_state = match self.program_isr_info.func_irq_infos.get(&self.func_def_id) {
-            Some(func_info) => {
-                // This must be Some since we have analyzed that function
-                func_info.pre_bb_irq_states.get(&location.block).unwrap()
-            }
+            Some(func_info) => func_info.pre_bb_irq_states.get(&location.block).unwrap(),
             None => return,
         };
         if *irq_state == IrqState::MustBeDisabled {
             return;
         }
 
-        // 2. Get the lockset of current position
         let callsite_lockset = match self.program_lock_set.get(&self.func_def_id) {
-            Some(func_info) => {
-                // This must be Some since we have analyzed that function
-                func_info.pre_bb_locksets.get(&location.block).unwrap()
-            }
+            Some(func_info) => func_info.pre_bb_locksets.get(&location.block).unwrap(),
             None => return,
         };
 
-        // 3. Iterate through all isr functions
         for isr_def_id in self.program_isr_info.isr_funcs.iter() {
             let isr_lock_ops = match self.program_lock_set.get(isr_def_id) {
                 Some(func_info) => &func_info.lock_operations,
@@ -226,19 +191,16 @@ impl<'tcx, 'a> Visitor<'tcx> for InterruptEdgeCollector<'tcx, 'a> {
             self.locksite_pairs.extend(
                 extract_locksite_pairs(callsite_lockset, isr_lock_ops)
                     .iter()
-                    .map(
-                        // Append CallSite information
-                        |pair| {
-                            (
-                                pair.0.clone(),
-                                pair.1.clone(),
-                                CallSite {
-                                    caller_def_id: self.func_def_id,
-                                    location,
-                                },
-                            )
-                        },
-                    ),
+                    .map(|pair| {
+                        (
+                            pair.0.clone(),
+                            pair.1.clone(),
+                            CallSite {
+                                caller_def_id: self.func_def_id,
+                                location,
+                            },
+                        )
+                    }),
             );
         }
     }
@@ -248,7 +210,6 @@ pub struct LDGConstructor<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     program_lock_set: &'a ProgramLockSet,
     program_isr_info: &'a ProgramIsrInfo,
-
     graph: LockDependencyGraph,
 }
 
@@ -272,11 +233,9 @@ impl<'tcx, 'a> LDGConstructor<'tcx, 'a> {
                 BodyOwnerKind::Fn => local_def_id.to_def_id(),
                 _ => continue,
             };
-            // Normal edge: foo() -> call -> bar()
             let normal_edges =
                 NormalEdgeCollector::new(self.tcx, def_id, self.program_lock_set).collect();
 
-            // Interrupt edge: foo() -> interrupt happens -> handler -> bar()
             let intr_edges = InterruptEdgeCollector::new(
                 self.tcx,
                 def_id,
@@ -287,23 +246,20 @@ impl<'tcx, 'a> LDGConstructor<'tcx, 'a> {
 
             for (new, old, callsite) in normal_edges.iter() {
                 self.graph.insert_normal_edge(new, old, callsite);
-                // rtool_info!("Normal | {} -> {}, Function call at: {:?}", new, old, callsite);
             }
 
             for (new, old, callsite) in intr_edges.iter() {
                 self.graph.insert_interrupt_edge(new, old, callsite);
-                // rtool_info!("Interrupt | {} -> {}, Interrupt happens at: {:?}", new, old, callsite);
             }
         }
     }
 
     pub fn print_result(&self) {
         let mut result = String::new();
-        result.push_str("\n");
+        result.push('\n');
         for (idx, lock) in self.graph.graph.node_references() {
             result.push_str(format!("{} {}\n", idx.index(), lock).as_str());
         }
-        // Calculate edge num
         let mut call_edge_num = 0;
         let mut intr_edge_num = 0;
         for edge in self.graph.graph.edge_references() {

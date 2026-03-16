@@ -1,6 +1,5 @@
 use crate::args;
 use std::{
-    env,
     path::PathBuf,
     process::{self, Command},
 };
@@ -32,9 +31,5 @@ pub fn run_rustc() {
 pub fn run_rtool() {
     let mut cmd = Command::new(find_rtool());
     cmd.args(args::skip2());
-    let magic = env::var("rtool_ARGS").expect("Missing rtool_ARGS.");
-    let rtool_args: Vec<String> =
-        serde_json::from_str(&magic).expect("Failed to deserialize rtool_ARGS.");
-    cmd.args(rtool_args);
     run_cmd(cmd);
 }
