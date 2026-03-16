@@ -329,8 +329,13 @@ impl<'tcx> TagParser<'tcx> {
     where
         F: Fn(&LockTagItem) -> bool,
     {
-        self.tcx
-            .get_all_attrs(did)
+        let attrs = if did.is_local() {
+            self.tcx.hir_attrs(self.tcx.local_def_id_to_hir_id(did.expect_local()))
+        } else {
+            self.tcx.get_all_attrs(did)
+        };
+
+        attrs
             .iter()
             .filter_map(|attr| extract_locktag_item(did, attr))
             .filter(filter)

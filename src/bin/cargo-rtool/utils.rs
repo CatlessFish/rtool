@@ -1,5 +1,6 @@
 use crate::args;
 use std::{
+    os::unix::process::ExitStatusExt,
     path::PathBuf,
     process::{self, Command},
 };
@@ -15,7 +16,15 @@ pub fn run_cmd(mut cmd: Command) {
     match cmd.status() {
         Ok(status) => {
             if !status.success() {
-                process::exit(status.code().unwrap());
+                if let Some(code) = status.code() {
+                    process::exit(code);
+                }
+
+                if let Some(signal) = status.signal() {
+                    panic!("Command {:?} terminated by signal {}.", cmd, signal);
+                }
+
+                panic!("Command {:?} failed without exit code or signal.", cmd);
             }
         }
         Err(err) => panic!("Error in running {:?} {}.", cmd, err),

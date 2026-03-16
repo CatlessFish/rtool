@@ -34,6 +34,56 @@ impl TrackedPlace {
 type LocalTrackedPlaceMap = HashMap<Local, HashSet<TrackedPlace>>;
 type ReturnSummaryMap = HashMap<DefId, HashSet<TrackedPlace>>;
 
+fn first_type_arg<'tcx>(args: GenericArgsRef<'tcx>) -> Option<Ty<'tcx>> {
+    args.iter().find_map(|arg| arg.as_type())
+}
+
+fn wrapper_inner_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
+    match ty.kind() {
+        TyKind::Ref(_, inner_ty, _) => Some(*inner_ty),
+        TyKind::Adt(adt_def, args) => match tcx.item_name(adt_def.did()).as_str() {
+            "Arc" | "Box" | "Pin" | "Once" | "MaybeUninit" | "UnsafeCell" | "SyncUnsafeCell"
+            | "ManuallyDrop" | "Option" | "Result" => first_type_arg(*args),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn ty_may_reach_lock<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    lock_types: &HashSet<AdtDef<'tcx>>,
+    ty: Ty<'tcx>,
+    field_depth: usize,
+    path_stack: &mut HashSet<Ty<'tcx>>,
+) -> bool {
+    if field_depth > MAX_LOCK_FIELD_DEPTH || !path_stack.insert(ty) {
+        return false;
+    }
+
+    if let Some(inner_ty) = wrapper_inner_ty(tcx, ty) {
+        let result = ty_may_reach_lock(tcx, lock_types, inner_ty, field_depth, path_stack);
+        path_stack.remove(&ty);
+        return result;
+    }
+
+    let TyKind::Adt(adt_def, args) = ty.kind() else {
+        path_stack.remove(&ty);
+        return false;
+    };
+
+    if lock_types.contains(adt_def) {
+        path_stack.remove(&ty);
+        return true;
+    }
+
+    let result = adt_def
+        .all_fields()
+        .any(|field| ty_may_reach_lock(tcx, lock_types, field.ty(tcx, args), field_depth + 1, path_stack));
+    path_stack.remove(&ty);
+    result
+}
+
 struct LockGuardInstanceCollector<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     func_def_id: DefId,
@@ -138,22 +188,8 @@ impl<'tcx> LockInstanceCollector<'tcx> {
         }
     }
 
-    fn first_type_arg(args: GenericArgsRef<'tcx>) -> Option<Ty<'tcx>> {
-        args.iter().find_map(|arg| arg.as_type())
-    }
-
     fn wrapper_inner_ty(&self, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
-        match ty.kind() {
-            TyKind::Ref(_, inner_ty, _) => Some(*inner_ty),
-            TyKind::Adt(adt_def, args) => match self.tcx.item_name(adt_def.did()).as_str() {
-                "Arc" | "Box" | "Pin" | "Once" | "MaybeUninit" | "UnsafeCell"
-                | "SyncUnsafeCell" | "ManuallyDrop" | "Option" | "Result" => {
-                    Self::first_type_arg(*args)
-                }
-                _ => None,
-            },
-            _ => None,
-        }
+        wrapper_inner_ty(self.tcx, ty)
     }
 
     fn field_name(&self, current_ty: Ty<'tcx>, field_idx: usize) -> String {
@@ -261,25 +297,25 @@ impl<'tcx> LockInstanceCollector<'tcx> {
     }
 }
 
-struct LockMapBuilder<'tcx> {
+struct LockMapBuilder<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     func_def_id: DefId,
-    lock_types: HashSet<AdtDef<'tcx>>,
-    lockguard_instances: HashSet<LockGuardInstance>,
-    callee_return_summaries: ReturnSummaryMap,
+    lock_types: &'a HashSet<AdtDef<'tcx>>,
+    lockguard_instances: &'a HashSet<LockGuardInstance>,
+    callee_return_summaries: &'a ReturnSummaryMap,
     body: &'tcx Body<'tcx>,
     local_tracked_places: LocalTrackedPlaceMap,
     lockmap: LocalLockMap,
     discovered_lock_instances: HashSet<LockInstance>,
 }
 
-impl<'tcx> LockMapBuilder<'tcx> {
+impl<'a, 'tcx> LockMapBuilder<'a, 'tcx> {
     pub fn new(
         tcx: TyCtxt<'tcx>,
         func_def_id: DefId,
-        lockguard_instances: HashSet<LockGuardInstance>,
-        lock_types: HashSet<AdtDef<'tcx>>,
-        callee_return_summaries: ReturnSummaryMap,
+        lockguard_instances: &'a HashSet<LockGuardInstance>,
+        lock_types: &'a HashSet<AdtDef<'tcx>>,
+        callee_return_summaries: &'a ReturnSummaryMap,
     ) -> Self {
         let body = tcx.optimized_mir(func_def_id);
         Self {
@@ -295,22 +331,8 @@ impl<'tcx> LockMapBuilder<'tcx> {
         }
     }
 
-    fn first_type_arg(args: GenericArgsRef<'tcx>) -> Option<Ty<'tcx>> {
-        args.iter().find_map(|arg| arg.as_type())
-    }
-
     fn wrapper_inner_ty(&self, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
-        match ty.kind() {
-            TyKind::Ref(_, inner_ty, _) => Some(*inner_ty),
-            TyKind::Adt(adt_def, args) => match self.tcx.item_name(adt_def.did()).as_str() {
-                "Arc" | "Box" | "Pin" | "Once" | "MaybeUninit" | "UnsafeCell"
-                | "SyncUnsafeCell" | "ManuallyDrop" | "Option" | "Result" => {
-                    Self::first_type_arg(*args)
-                }
-                _ => None,
-            },
-            _ => None,
-        }
+        wrapper_inner_ty(self.tcx, ty)
     }
 
     fn ty_may_reach_lock(
@@ -319,31 +341,7 @@ impl<'tcx> LockMapBuilder<'tcx> {
         field_depth: usize,
         path_stack: &mut HashSet<Ty<'tcx>>,
     ) -> bool {
-        if field_depth > MAX_LOCK_FIELD_DEPTH || !path_stack.insert(ty) {
-            return false;
-        }
-
-        if let Some(inner_ty) = self.wrapper_inner_ty(ty) {
-            let result = self.ty_may_reach_lock(inner_ty, field_depth, path_stack);
-            path_stack.remove(&ty);
-            return result;
-        }
-
-        let TyKind::Adt(adt_def, args) = ty.kind() else {
-            path_stack.remove(&ty);
-            return false;
-        };
-
-        if self.lock_types.contains(adt_def) {
-            path_stack.remove(&ty);
-            return true;
-        }
-
-        let result = adt_def.all_fields().any(|field| {
-            self.ty_may_reach_lock(field.ty(self.tcx, args), field_depth + 1, path_stack)
-        });
-        path_stack.remove(&ty);
-        result
+        ty_may_reach_lock(self.tcx, self.lock_types, ty, field_depth, path_stack)
     }
 
     fn field_name(&self, current_ty: Ty<'tcx>, field_idx: usize) -> String {
@@ -546,7 +544,7 @@ impl<'tcx> LockMapBuilder<'tcx> {
     }
 }
 
-impl<'tcx> Visitor<'tcx> for LockMapBuilder<'tcx> {
+impl<'a, 'tcx> Visitor<'tcx> for LockMapBuilder<'a, 'tcx> {
     fn visit_terminator(
         &mut self,
         terminator: &Terminator<'tcx>,
@@ -677,16 +675,45 @@ impl<'tcx, 'a> LockCollector<'tcx, 'a> {
             initial_static_instances
         );
 
+        let lockguard_functions: HashSet<_> = self
+            .lockguard_instances
+            .iter()
+            .map(|guard| guard.func_def_id)
+            .collect();
         let function_ids: Vec<_> = self
             .tcx
             .hir_body_owners()
             .filter_map(
                 |local_def_id| match self.tcx.hir_body_owner_kind(local_def_id) {
-                    BodyOwnerKind::Fn => Some(local_def_id.to_def_id()),
+                    BodyOwnerKind::Fn => {
+                        let def_id = local_def_id.to_def_id();
+                        if lockguard_functions.contains(&def_id) {
+                            return Some(def_id);
+                        }
+
+                        let body = self.tcx.optimized_mir(def_id);
+                        let return_ty = body.local_decls[RETURN_PLACE].ty;
+                        let mut path_stack = HashSet::new();
+                        if ty_may_reach_lock(
+                            self.tcx,
+                            &self.lock_types,
+                            return_ty,
+                            0,
+                            &mut path_stack,
+                        ) {
+                            Some(def_id)
+                        } else {
+                            None
+                        }
+                    }
                     _ => None,
                 },
             )
             .collect();
+        rtool_debug!(
+            "Deadlock lock collector: {} relevant functions selected for lockmap propagation",
+            function_ids.len()
+        );
 
         let mut return_summaries: ReturnSummaryMap = HashMap::new();
         let mut iteration_limit = 4 * function_ids.len().max(1);
@@ -703,9 +730,9 @@ impl<'tcx, 'a> LockCollector<'tcx, 'a> {
                 let mut lockmap_builder = LockMapBuilder::new(
                     self.tcx,
                     *def_id,
-                    self.lockguard_instances.clone(),
-                    self.lock_types.clone(),
-                    return_summaries.clone(),
+                    &self.lockguard_instances,
+                    &self.lock_types,
+                    &return_summaries,
                 );
                 let (func_lockmap, discovered_locks, return_summary) = lockmap_builder.collect();
 

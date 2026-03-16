@@ -3,7 +3,6 @@ use std::fmt::{self, Display, Formatter};
 
 use petgraph::graph::DiGraph;
 use petgraph::graph::NodeIndex;
-use petgraph::visit::IntoNodeReferences;
 
 extern crate rustc_mir_dataflow;
 use rustc_hir::def_id::DefId;
@@ -458,12 +457,16 @@ pub type LockDependencyNode = LockInstance;
 #[derive(Debug, Clone)]
 pub struct LockDependencyGraph {
     pub graph: DiGraph<LockDependencyNode, LockDependencyEdge>,
+    node_indices: HashMap<LockInstance, NodeIndex>,
+    interrupt_edge_keys: HashSet<(LockInstance, LockInstance)>,
 }
 
 impl LockDependencyGraph {
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
+            node_indices: HashMap::new(),
+            interrupt_edge_keys: HashSet::new(),
         }
     }
 
@@ -489,25 +492,15 @@ impl LockDependencyGraph {
         old_lock_site: &LockSite,
         interrupt_location: &CallSite,
     ) {
-        let new_node_idx = self.node_id_or_insert(&new_lock_site.lock);
-        let old_node_idx = self.node_id_or_insert(&old_lock_site.lock);
-        if self
-            .graph
-            .edges_connecting(new_node_idx, old_node_idx)
-            .any(|edge| {
-                // If an edge with the same new and old lock_site exists, ignore this insert
-                if edge.weight().new_lock_site == *new_lock_site
-                    && edge.weight().old_lock_site == *old_lock_site
-                {
-                    return true;
-                } else {
-                    return false;
-                }
-            })
+        if !self
+            .interrupt_edge_keys
+            .insert((new_lock_site.lock.clone(), old_lock_site.lock.clone()))
         {
-            // Skip if we already have an interrupt edge
             return;
         }
+
+        let new_node_idx = self.node_id_or_insert(&new_lock_site.lock);
+        let old_node_idx = self.node_id_or_insert(&old_lock_site.lock);
         let edge_weight = LockDependencyEdge {
             edge_type: LockDependencyEdgeType::Interrupt(interrupt_location.clone()),
             new_lock_site: new_lock_site.clone(),
@@ -517,15 +510,12 @@ impl LockDependencyGraph {
     }
 
     pub fn node_id_or_insert(&mut self, lock: &LockInstance) -> NodeIndex {
-        if let Some(idx) = self
-            .graph
-            .node_references()
-            .find(|(_idx, node)| **node == *lock)
-            .map(|(idx, _)| idx)
-        {
-            return idx;
+        if let Some(idx) = self.node_indices.get(lock) {
+            *idx
         } else {
-            self.graph.add_node(lock.clone())
+            let idx = self.graph.add_node(lock.clone());
+            self.node_indices.insert(lock.clone(), idx);
+            idx
         }
     }
 }

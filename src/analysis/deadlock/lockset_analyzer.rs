@@ -1,4 +1,4 @@
-use rustc_hir::{BodyOwnerKind, def_id::DefId};
+use rustc_hir::def_id::DefId;
 use rustc_middle::mir::{
     BasicBlock, Body, CallReturnPlaces, Location, TerminatorEdges, TerminatorKind,
 };
@@ -221,10 +221,13 @@ impl<'tcx, 'a> FuncLockSetAnalyzer<'tcx, 'a> {
         for (loc, callee) in callsites.iter() {
             cursor.seek_to_block_start(loc.block);
             let new_entry_set = cursor.get();
+            let inner_context = CallContext::Place(CallSite {
+                caller_def_id: self.func_def_id,
+                location: *loc,
+            });
             let old_entry_set = match self.analyzed_functions.get(callee) {
                 Some(callee_func_info) => {
-                    if let Some(entry_set) = callee_func_info.entry_lockset.get(&self.call_context)
-                    {
+                    if let Some(entry_set) = callee_func_info.entry_lockset.get(&inner_context) {
                         entry_set
                     } else {
                         &LockSet::new()
@@ -233,10 +236,6 @@ impl<'tcx, 'a> FuncLockSetAnalyzer<'tcx, 'a> {
                 None => &LockSet::new(),
             };
             if new_entry_set != old_entry_set {
-                let inner_context = CallContext::Place(CallSite {
-                    caller_def_id: self.func_def_id,
-                    location: *loc,
-                });
                 self.influenced_callees
                     .insert(*callee, (inner_context, new_entry_set.clone()));
             }
@@ -286,15 +285,11 @@ impl<'tcx, 'a> LockSetAnalyzer<'tcx, 'a> {
 
     pub fn run(&mut self) -> ProgramLockSet {
         let mut worklist: VecDeque<(DefId, CallContext, LockSet)> = VecDeque::new();
-        for local_def_id in self.tcx.hir_body_owners() {
-            let def_id = match self.tcx.hir_body_owner_kind(local_def_id) {
-                BodyOwnerKind::Fn => local_def_id.to_def_id(),
-                _ => continue,
-            };
+        for def_id in self.global_lockmap.keys().copied() {
             worklist.push_back((def_id, CallContext::Default, LockSet::new()));
         }
 
-        let mut iteration_limit = 10 * worklist.len();
+        let mut iteration_limit = 10 * worklist.len().max(1);
         while iteration_limit > 0 && !worklist.is_empty() {
             iteration_limit -= 1;
             let (func_def_id, call_context, single_entry_lockset) = worklist.pop_front().unwrap();
@@ -302,18 +297,24 @@ impl<'tcx, 'a> LockSetAnalyzer<'tcx, 'a> {
                 Some(lockmap) => lockmap,
                 None => continue,
             };
+            let had_existing_result = self.analyzed_functions.contains_key(&func_def_id);
 
-            let current_entry_lockset =
-                if let Some(func_lock_set) = self.analyzed_functions.get_mut(&func_def_id) {
-                    &mut func_lock_set.entry_lockset
-                } else {
-                    &mut HashMap::new()
-                };
-
-            if let Some(old_lockset) = current_entry_lockset.get_mut(&call_context) {
-                old_lockset.merge(&single_entry_lockset);
+            let current_entry_lockset = if let Some(func_lock_set) =
+                self.analyzed_functions.get_mut(&func_def_id)
+            {
+                &mut func_lock_set.entry_lockset
             } else {
-                current_entry_lockset.insert(call_context.clone(), LockSet::new());
+                &mut HashMap::new()
+            };
+            let entry_changed = if let Some(old_lockset) = current_entry_lockset.get_mut(&call_context)
+            {
+                old_lockset.merge(&single_entry_lockset)
+            } else {
+                current_entry_lockset.insert(call_context.clone(), single_entry_lockset.clone());
+                true
+            };
+            if had_existing_result && !entry_changed {
+                continue;
             }
 
             let mut func_analyzer = FuncLockSetAnalyzer::new(

@@ -61,21 +61,26 @@ impl<'tcx> DeadlockDetector<'tcx> {
     pub fn run_with_tag_io(&mut self, save_tags: Option<&str>, load_tags: Option<&str>) {
         rtool_info!("Executing Deadlock Detection");
 
+        rtool_info!("Deadlock phase: build callgraph");
         let mut callgraph_analyzer = CallGraphAnalyzer::new(self.tcx);
         callgraph_analyzer.start();
         self.callgraph = callgraph_analyzer.get_callgraph();
 
+        rtool_info!("Deadlock phase: parse tags");
         let tag_parser = TagParser::new(self.tcx);
         let tags = tag_parser.load_analyze_save(load_tags, save_tags);
         self.parsed_tags = tags;
 
+        rtool_info!("Deadlock phase: collect lock information");
         let mut lock_collector = LockCollector::new(self.tcx, &self.parsed_tags);
         self.program_lock_info = lock_collector.collect();
         lock_collector.print_result();
 
+        rtool_info!("Deadlock phase: analyze locksets");
         let mut lockset_analyzer = LockSetAnalyzer::new(self.tcx, &self.program_lock_info.lockmap);
         self.program_lock_set = lockset_analyzer.run();
 
+        rtool_info!("Deadlock phase: analyze interrupt state");
         let mut isr_analyzer = IsrAnalyzer::new(
             self.tcx,
             &self.callgraph,
@@ -84,11 +89,13 @@ impl<'tcx> DeadlockDetector<'tcx> {
         );
         self.program_isr_info = isr_analyzer.run();
 
+        rtool_info!("Deadlock phase: construct dependency graph");
         let mut ldg_constructor =
             LDGConstructor::new(self.tcx, &self.program_lock_set, &self.program_isr_info);
         ldg_constructor.run();
         self.lock_dependency_graph = ldg_constructor.into_graph();
 
+        rtool_info!("Deadlock phase: report cycles");
         let mut lock_reporter = DeadlockReporter::new(self.tcx, &self.lock_dependency_graph);
         lock_reporter.run();
     }

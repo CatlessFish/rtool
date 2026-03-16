@@ -3,142 +3,23 @@ use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use rustc_hir::BodyOwnerKind;
 use rustc_hir::def_id::DefId;
 use rustc_middle::mir::visit::Visitor;
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::Body;
 use rustc_middle::ty::TyCtxt;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::analysis::deadlock::types::{interrupt::*, lock::*, *};
 use crate::rtool_info;
 
-fn extract_locksite_pairs(
-    callsite_lockset: &LockSet,
-    callee_lock_operations: &HashSet<LockSite>,
-) -> HashSet<(LockSite, LockSite)> {
-    let mut result = HashSet::new();
-    let caller_locksites: HashSet<LockSite> = callsite_lockset
-        .lock_sites
-        .iter()
-        .filter(|(lock, _)| {
-            callsite_lockset
-                .lock_states
-                .get(lock)
-                .is_some_and(|state| *state == LockState::MayHold)
-        })
-        .flat_map(|(lock, callsites)| {
-            callsites.iter().map(|callsite| LockSite {
-                lock: lock.clone(),
-                site: *callsite,
-            })
-        })
-        .collect();
-    for callee_locksite in callee_lock_operations {
-        for caller_locksite in caller_locksites.iter() {
-            result.insert((callee_locksite.clone(), caller_locksite.clone()));
-        }
-    }
-    result
-}
-
-type LockSitePairsWithCallSite = HashSet<(LockSite, LockSite, CallSite)>;
-
-struct NormalEdgeCollector<'tcx, 'a> {
-    _tcx: TyCtxt<'tcx>,
-    caller_def_id: DefId,
-    program_lock_set: &'a ProgramLockSet,
-    locksite_pairs: LockSitePairsWithCallSite,
-}
-
-impl<'tcx, 'a> NormalEdgeCollector<'tcx, 'a> {
-    pub fn new(
-        _tcx: TyCtxt<'tcx>,
-        func_def_id: DefId,
-        program_lock_set: &'a ProgramLockSet,
-    ) -> Self {
-        Self {
-            _tcx,
-            caller_def_id: func_def_id,
-            program_lock_set,
-            locksite_pairs: HashSet::new(),
-        }
-    }
-
-    pub fn collect(mut self) -> LockSitePairsWithCallSite {
-        if let Some(func_info) = self.program_lock_set.get(&self.caller_def_id) {
-            for new_lock_site in func_info.lock_operations.iter() {
-                if let Some(current_lockset) = func_info
-                    .pre_bb_locksets
-                    .get(&new_lock_site.site.location.block)
-                {
-                    let held_lock_sites: HashSet<LockSite> = current_lockset
-                        .lock_sites
-                        .iter()
-                        .filter(|(lock, _)| {
-                            current_lockset
-                                .lock_states
-                                .get(lock)
-                                .is_some_and(|state| *state == LockState::MayHold)
-                        })
-                        .flat_map(|(lock, callsites)| {
-                            callsites.iter().map(|callsite| LockSite {
-                                lock: lock.clone(),
-                                site: *callsite,
-                            })
-                        })
-                        .collect();
-                    for held_lock_site in held_lock_sites {
-                        self.locksite_pairs.insert((
-                            new_lock_site.clone(),
-                            held_lock_site,
-                            new_lock_site.site,
-                        ));
-                    }
-                }
-            }
-        }
-
-        self.locksite_pairs
-    }
-}
-
-impl<'tcx, 'a> Visitor<'tcx> for NormalEdgeCollector<'tcx, 'a> {
-    fn visit_terminator(
-        &mut self,
-        terminator: &rustc_middle::mir::Terminator<'tcx>,
-        location: rustc_middle::mir::Location,
-    ) {
-        let callsite_lockset = match self.program_lock_set.get(&self.caller_def_id) {
-            Some(func_lockset) => func_lockset.pre_bb_locksets.get(&location.block).unwrap(),
-            None => return,
-        };
-        if let TerminatorKind::Call { func, .. } = &terminator.kind {
-            if let Some((callee_def_id, _)) = func.const_fn_def() {
-                if let Some(callee_func_info) = self.program_lock_set.get(&callee_def_id) {
-                    self.locksite_pairs.extend(
-                        extract_locksite_pairs(callsite_lockset, &callee_func_info.lock_operations)
-                            .iter()
-                            .map(|pair| {
-                                (
-                                    pair.0.clone(),
-                                    pair.1.clone(),
-                                    CallSite {
-                                        caller_def_id: self.caller_def_id,
-                                        location,
-                                    },
-                                )
-                            }),
-                    );
-                }
-            }
-        }
-    }
-}
+type LockSitePairsWithCallSite = Vec<(LockSite, LockSite, CallSite)>;
 
 struct InterruptEdgeCollector<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     func_def_id: DefId,
     program_lock_set: &'a ProgramLockSet,
     program_isr_info: &'a ProgramIsrInfo,
+    isr_lock_ops_by_lock: &'a HashMap<LockInstance, LockSite>,
     locksite_pairs: LockSitePairsWithCallSite,
+    seen_locks: HashSet<LockInstance>,
 }
 
 impl<'tcx, 'a> InterruptEdgeCollector<'tcx, 'a> {
@@ -147,13 +28,16 @@ impl<'tcx, 'a> InterruptEdgeCollector<'tcx, 'a> {
         func_def_id: DefId,
         program_lock_set: &'a ProgramLockSet,
         program_isr_info: &'a ProgramIsrInfo,
+        isr_lock_ops_by_lock: &'a HashMap<LockInstance, LockSite>,
     ) -> Self {
         Self {
             tcx,
             func_def_id,
             program_lock_set,
             program_isr_info,
-            locksite_pairs: HashSet::new(),
+            isr_lock_ops_by_lock,
+            locksite_pairs: Vec::new(),
+            seen_locks: HashSet::new(),
         }
     }
 
@@ -183,25 +67,38 @@ impl<'tcx, 'a> Visitor<'tcx> for InterruptEdgeCollector<'tcx, 'a> {
             None => return,
         };
 
-        for isr_def_id in self.program_isr_info.isr_funcs.iter() {
-            let isr_lock_ops = match self.program_lock_set.get(isr_def_id) {
-                Some(func_info) => &func_info.lock_operations,
-                None => continue,
+        for (held_lock, state) in callsite_lockset.lock_states.iter() {
+            if *state != LockState::MayHold {
+                continue;
+            }
+
+            if !self.seen_locks.insert(held_lock.clone()) {
+                continue;
+            }
+
+            let Some(held_callsite) = callsite_lockset
+                .lock_sites
+                .get(held_lock)
+                .and_then(|sites| sites.iter().next().copied())
+            else {
+                continue;
             };
-            self.locksite_pairs.extend(
-                extract_locksite_pairs(callsite_lockset, isr_lock_ops)
-                    .iter()
-                    .map(|pair| {
-                        (
-                            pair.0.clone(),
-                            pair.1.clone(),
-                            CallSite {
-                                caller_def_id: self.func_def_id,
-                                location,
-                            },
-                        )
-                    }),
-            );
+
+            let Some(new_lock_site) = self.isr_lock_ops_by_lock.get(held_lock) else {
+                continue;
+            };
+
+            self.locksite_pairs.push((
+                new_lock_site.clone(),
+                LockSite {
+                    lock: held_lock.clone(),
+                    site: held_callsite,
+                },
+                CallSite {
+                    caller_def_id: self.func_def_id,
+                    location,
+                },
+            ));
         }
     }
 }
@@ -210,6 +107,7 @@ pub struct LDGConstructor<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     program_lock_set: &'a ProgramLockSet,
     program_isr_info: &'a ProgramIsrInfo,
+    isr_lock_ops_by_lock: HashMap<LockInstance, LockSite>,
     graph: LockDependencyGraph,
 }
 
@@ -223,6 +121,7 @@ impl<'tcx, 'a> LDGConstructor<'tcx, 'a> {
             tcx,
             program_isr_info,
             program_lock_set,
+            isr_lock_ops_by_lock: collect_isr_lock_ops_by_lock(program_lock_set, program_isr_info),
             graph: LockDependencyGraph::new(),
         }
     }
@@ -233,20 +132,14 @@ impl<'tcx, 'a> LDGConstructor<'tcx, 'a> {
                 BodyOwnerKind::Fn => local_def_id.to_def_id(),
                 _ => continue,
             };
-            let normal_edges =
-                NormalEdgeCollector::new(self.tcx, def_id, self.program_lock_set).collect();
-
             let intr_edges = InterruptEdgeCollector::new(
                 self.tcx,
                 def_id,
                 self.program_lock_set,
                 self.program_isr_info,
+                &self.isr_lock_ops_by_lock,
             )
             .collect();
-
-            for (new, old, callsite) in normal_edges.iter() {
-                self.graph.insert_normal_edge(new, old, callsite);
-            }
 
             for (new, old, callsite) in intr_edges.iter() {
                 self.graph.insert_interrupt_edge(new, old, callsite);
@@ -298,4 +191,25 @@ impl<'tcx, 'a> LDGConstructor<'tcx, 'a> {
     pub fn into_graph(self) -> LockDependencyGraph {
         self.graph
     }
+}
+
+fn collect_isr_lock_ops_by_lock(
+    program_lock_set: &ProgramLockSet,
+    program_isr_info: &ProgramIsrInfo,
+) -> HashMap<LockInstance, LockSite> {
+    let mut isr_lock_ops_by_lock = HashMap::new();
+
+    for isr_def_id in program_isr_info.isr_funcs.iter() {
+        let Some(func_info) = program_lock_set.get(isr_def_id) else {
+            continue;
+        };
+
+        for lock_site in func_info.lock_operations.iter() {
+            isr_lock_ops_by_lock
+                .entry(lock_site.lock.clone())
+                .or_insert_with(|| lock_site.clone());
+        }
+    }
+
+    isr_lock_ops_by_lock
 }
