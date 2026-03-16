@@ -31,7 +31,6 @@ use rustc_interface::{
     interface::{self, Compiler},
 };
 use rustc_middle::{ty::TyCtxt, util::Providers};
-use rustc_session::search_paths::PathKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -63,7 +62,7 @@ impl Callbacks for RtoolCallback {
                 // HACK: rustc will emit "crate ... required to be available in rlib format, but
                 // was not found in this form" errors once we use `tcx.dependency_formats()` if
                 // there's no rlib provided, so setting a dummy path here to workaround those errors.
-                Arc::make_mut(&mut crate_source).rlib = Some((PathBuf::new(), PathKind::All));
+                Arc::make_mut(&mut crate_source).rlib = Some(PathBuf::new());
                 crate_source
             };
         });

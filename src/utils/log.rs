@@ -3,7 +3,7 @@ use fern::colors::{Color, ColoredLevelConfig};
 use fern::{self, Dispatch};
 use log::LevelFilter;
 use rustc_span::source_map::get_source_map;
-use rustc_span::{FileNameDisplayPreference, Pos, Span};
+use rustc_span::{Pos, Span};
 use std::ops::Range;
 
 fn log_level() -> LevelFilter {
@@ -123,7 +123,7 @@ pub fn span_to_filename(span: Span) -> String {
     get_source_map()
         .unwrap()
         .span_to_filename(span)
-        .display(FileNameDisplayPreference::Local)
+        .prefer_local_unconditionally()
         .to_string()
 }
 

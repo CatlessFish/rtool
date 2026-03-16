@@ -55,7 +55,7 @@ impl<'tcx> Display for TerminatorKind<'tcx> {
                 },
                 _ => (),
             },
-            TerminatorKind::TailCall { .. } => todo!(),
+            TerminatorKind::TailCall { .. } => s += self.name(),
         };
         s
     }
@@ -88,7 +88,9 @@ impl<'tcx> Display for StatementKind<'tcx> {
             StatementKind::PlaceMention(..) => s += "PlaceMention",
             StatementKind::Intrinsic(..) => s += "Intrinsic",
             StatementKind::ConstEvalCounter => s += "ConstEvalCounter",
-            _ => todo!(),
+            StatementKind::BackwardIncompatibleDropHint { .. } => {
+                s += "BackwardIncompatibleDropHint"
+            }
         }
         s
     }
@@ -105,14 +107,12 @@ impl<'tcx> Display for Rvalue<'tcx> {
             Rvalue::ThreadLocalRef(..) => s += "ThreadLocalRef",
             Rvalue::Cast(..) => s += "Cast",
             Rvalue::BinaryOp(..) => s += "BinaryOp",
-            Rvalue::NullaryOp(..) => s += "NullaryOp",
             Rvalue::UnaryOp(..) => s += "UnaryOp",
             Rvalue::Discriminant(..) => s += "Discriminant",
             Rvalue::Aggregate(..) => s += "Aggregate",
-            Rvalue::ShallowInitBox(..) => s += "ShallowInitBox",
             Rvalue::CopyForDeref(..) => s += "CopyForDeref",
             Rvalue::RawPtr(_, _) => s += "RawPtr",
-            _ => todo!(),
+            Rvalue::WrapUnsafeBinder(..) => s += "WrapUnsafeBinder",
         }
         s
     }

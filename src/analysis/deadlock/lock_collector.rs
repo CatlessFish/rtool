@@ -470,6 +470,7 @@ impl<'tcx> LockMapBuilder<'tcx> {
                 });
                 roots
             }
+            Operand::RuntimeChecks(..) => HashSet::new(),
         }
     }
 
@@ -575,6 +576,7 @@ impl<'tcx> Visitor<'tcx> for LockMapBuilder<'tcx> {
                             self.record_guard_locks(destination.local, locks);
                         }
                         Operand::Constant(..) => {}
+                        Operand::RuntimeChecks(..) => {}
                     }
                 }
                 return;

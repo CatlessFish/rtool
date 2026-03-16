@@ -1,7 +1,7 @@
 use rustc_hir::Node::*;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::{
-    FileName, FileNameDisplayPreference,
+    FileName,
     def_id::{CrateNum, DefId},
     symbol::Symbol,
 };
@@ -82,10 +82,5 @@ pub fn get_filename(tcx: TyCtxt<'_>, def_id: DefId) -> Option<String> {
 }
 
 fn convert_filename(filename: FileName) -> String {
-    match filename {
-        FileName::Real(path) => path
-            .to_string_lossy(FileNameDisplayPreference::Local)
-            .into_owned(),
-        _ => "<unknown>".to_string(),
-    }
+    filename.prefer_local_unconditionally().to_string()
 }
