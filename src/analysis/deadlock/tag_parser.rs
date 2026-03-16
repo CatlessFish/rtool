@@ -307,7 +307,7 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                         Some(LockTagItem::IntrApi(did, typ, nested, attr.span.into()))
                     }
                     None => {
-                            crate::rtool_warn!("Failed to parse IntrApi attribute for {:?}", did);
+                        crate::rtool_warn!("Failed to parse IntrApi attribute for {:?}", did);
                         None
                     }
                 },
