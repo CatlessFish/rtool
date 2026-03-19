@@ -86,10 +86,10 @@ impl<'tcx, 'a> Analysis<'tcx> for FuncLockSetAnalyzerInner<'a> {
                         .iter()
                         .find(|(local, _)| **local == destination.local)
                     {
-                        for candidate_lock in lock.iter() {
-                            state.update_lock_state(candidate_lock.clone(), LockState::MayHold);
+                        for acquire_info in lock.iter() {
+                            state.update_lock_state(acquire_info.lock.clone(), LockState::MayHold);
                             state.add_callsite(
-                                candidate_lock.clone(),
+                                acquire_info.lock.clone(),
                                 CallSite {
                                     location,
                                     caller_def_id: self.func_def_id,
@@ -100,7 +100,7 @@ impl<'tcx, 'a> Analysis<'tcx> for FuncLockSetAnalyzerInner<'a> {
                                 .borrow_mut()
                                 .lock_operations
                                 .insert(LockSite {
-                                    lock: candidate_lock.clone(),
+                                    lock: acquire_info.lock.clone(),
                                     site: CallSite {
                                         caller_def_id: self.func_def_id,
                                         location,
@@ -134,9 +134,9 @@ impl<'tcx, 'a> Analysis<'tcx> for FuncLockSetAnalyzerInner<'a> {
                     .iter()
                     .find(|(local, _)| **local == place.local)
                 {
-                    for candidate_lock in lock.iter() {
-                        state.update_lock_state(candidate_lock.clone(), LockState::MustNotHold);
-                        if let Some(callsites) = state.lock_sites.get_mut(candidate_lock) {
+                    for acquire_info in lock.iter() {
+                        state.update_lock_state(acquire_info.lock.clone(), LockState::MustNotHold);
+                        if let Some(callsites) = state.lock_sites.get_mut(&acquire_info.lock) {
                             callsites.clear();
                         }
                     }
@@ -299,14 +299,14 @@ impl<'tcx, 'a> LockSetAnalyzer<'tcx, 'a> {
             };
             let had_existing_result = self.analyzed_functions.contains_key(&func_def_id);
 
-            let current_entry_lockset = if let Some(func_lock_set) =
-                self.analyzed_functions.get_mut(&func_def_id)
-            {
-                &mut func_lock_set.entry_lockset
-            } else {
-                &mut HashMap::new()
-            };
-            let entry_changed = if let Some(old_lockset) = current_entry_lockset.get_mut(&call_context)
+            let current_entry_lockset =
+                if let Some(func_lock_set) = self.analyzed_functions.get_mut(&func_def_id) {
+                    &mut func_lock_set.entry_lockset
+                } else {
+                    &mut HashMap::new()
+                };
+            let entry_changed = if let Some(old_lockset) =
+                current_entry_lockset.get_mut(&call_context)
             {
                 old_lockset.merge(&single_entry_lockset)
             } else {

@@ -1,9 +1,12 @@
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::{Body, Location, Statement, Terminator, TerminatorEdges, TerminatorKind};
+use rustc_middle::mir::{
+    Body, Local, Location, Statement, Terminator, TerminatorEdges, TerminatorKind,
+};
 use rustc_middle::ty::TyCtxt;
 use std::collections::{HashMap, HashSet};
 
 extern crate rustc_mir_dataflow;
+use rustc_mir_dataflow::fmt::DebugWithContext;
 use rustc_mir_dataflow::{Analysis, JoinSemiLattice};
 
 use crate::analysis::callgraph::CallGraph;
@@ -11,19 +14,58 @@ use crate::analysis::deadlock::tag_parser::LockTagItem;
 use crate::analysis::deadlock::types::{interrupt::*, lock::*};
 use crate::{rtool_debug, rtool_info};
 
-impl JoinSemiLattice for IrqState {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IrqAnalysisState {
+    ambient: IrqState,
+    active_irq_disabled_guards: HashSet<Local>,
+}
+
+impl IrqAnalysisState {
+    fn new() -> Self {
+        Self {
+            ambient: IrqState::new(),
+            active_irq_disabled_guards: HashSet::new(),
+        }
+    }
+
+    fn effective_irq_state(&self) -> IrqState {
+        if !self.active_irq_disabled_guards.is_empty() {
+            IrqState::MustBeDisabled
+        } else {
+            self.ambient.clone()
+        }
+    }
+}
+
+impl JoinSemiLattice for IrqAnalysisState {
     fn join(&mut self, other: &Self) -> bool {
         let old = self.clone();
-        *self = self.union(other);
+
+        match (&self.ambient, &other.ambient) {
+            (IrqState::Bottom, _) => *self = other.clone(),
+            (_, IrqState::Bottom) => {}
+            _ => {
+                self.ambient = self.ambient.union(&other.ambient);
+                self.active_irq_disabled_guards = self
+                    .active_irq_disabled_guards
+                    .intersection(&other.active_irq_disabled_guards)
+                    .copied()
+                    .collect();
+            }
+        }
+
         *self != old
     }
 }
+
+impl<C> DebugWithContext<C> for IrqAnalysisState {}
 
 struct FuncIsrAnalyzer<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     enable_interrupt_apis: Vec<DefId>,
     disable_interrupt_apis: Vec<DefId>,
-    lockguards: &'a HashSet<LockGuardInstance>,
+    lock_ops: HashMap<DefId, bool>,
+    lockmap: &'a LocalLockMap,
     analyzed_functions: &'a HashMap<DefId, FuncIrqInfo>,
 }
 
@@ -32,26 +74,28 @@ impl<'tcx, 'a> FuncIsrAnalyzer<'tcx, 'a> {
         tcx: TyCtxt<'tcx>,
         enable_interrupt_apis: Vec<DefId>,
         disable_interrupt_apis: Vec<DefId>,
-        lockguards: &'a HashSet<LockGuardInstance>,
+        lock_ops: HashMap<DefId, bool>,
+        lockmap: &'a LocalLockMap,
         analyzed_functions: &'a HashMap<DefId, FuncIrqInfo>,
     ) -> Self {
         FuncIsrAnalyzer {
             tcx,
             enable_interrupt_apis,
             disable_interrupt_apis,
-            lockguards,
+            lock_ops,
+            lockmap,
             analyzed_functions,
         }
     }
 }
 
 impl<'tcx, 'a> Analysis<'tcx> for FuncIsrAnalyzer<'tcx, 'a> {
-    type Domain = IrqState;
+    type Domain = IrqAnalysisState;
 
     const NAME: &'static str = "ISRAnalysis";
 
     fn bottom_value(&self, _body: &Body<'tcx>) -> Self::Domain {
-        IrqState::new()
+        IrqAnalysisState::new()
     }
 
     fn initialize_start_block(
@@ -59,7 +103,7 @@ impl<'tcx, 'a> Analysis<'tcx> for FuncIsrAnalyzer<'tcx, 'a> {
         _body: &rustc_middle::mir::Body<'tcx>,
         state: &mut Self::Domain,
     ) {
-        *state = IrqState::new()
+        *state = IrqAnalysisState::new()
     }
 
     fn apply_primary_statement_effect(
@@ -81,43 +125,41 @@ impl<'tcx, 'a> Analysis<'tcx> for FuncIsrAnalyzer<'tcx, 'a> {
                 func, destination, ..
             } => {
                 if let Some(callee_def_id) = func.const_fn_def() {
-                    let mut found_api = false;
                     if self.enable_interrupt_apis.contains(&callee_def_id.0) {
-                        found_api = true;
-                        *state = IrqState::MayBeEnabled;
+                        state.ambient = IrqState::MayBeEnabled;
+                        return terminator.edges();
                     }
 
                     if self.disable_interrupt_apis.contains(&callee_def_id.0) {
-                        found_api = true;
-                        *state = IrqState::MustBeDisabled;
+                        state.ambient = IrqState::MustBeDisabled;
+                        return terminator.edges();
                     }
 
-                    if !found_api && self.tcx.is_mir_available(callee_def_id.0) {
-                        if let Some(instance) = self
-                            .lockguards
-                            .iter()
-                            .find(|&inst| inst.local == destination.local)
-                        {
-                            if let LockGuardType::SpinLockLocalDisabled = instance.guard_type {
-                                *state = IrqState::MustBeDisabled;
-                            }
+                    if let Some(guard_irq_disabled) = self.lock_ops.get(&callee_def_id.0) {
+                        if *guard_irq_disabled {
+                            state.active_irq_disabled_guards.insert(destination.local);
                         }
+                        return terminator.edges();
+                    }
 
-                        if let Some(callee_info) = self.analyzed_functions.get(&callee_def_id.0) {
-                            state.join(&callee_info.exit_irq_state);
+                    if self.tcx.is_mir_available(callee_def_id.0) {
+                        if let Some(instance) = self
+                            .analyzed_functions
+                            .get(&callee_def_id.0)
+                            .map(|callee_info| &callee_info.exit_irq_state)
+                        {
+                            state.ambient = state.ambient.union(instance);
                         }
                     }
                 }
             }
             TerminatorKind::Drop { place, .. } => {
-                if let Some(instance) = self
-                    .lockguards
-                    .iter()
-                    .find(|&inst| inst.local == place.local)
-                {
-                    if let LockGuardType::SpinLockLocalDisabled = instance.guard_type {
-                        *state = IrqState::MayBeEnabled;
-                    }
+                if self.lockmap.get(&place.local).is_some_and(|infos| {
+                    infos
+                        .iter()
+                        .any(|info| info.irq_semantics == GuardIrqSemantics::DisabledWhileHeld)
+                }) {
+                    state.active_irq_disabled_guards.remove(&place.local);
                 }
             }
             _ => {}
@@ -133,6 +175,7 @@ pub struct IsrAnalyzer<'tcx, 'a> {
     program_lock_info: &'a ProgramLockInfo,
     enable_interrupt_apis: Vec<DefId>,
     disable_interrupt_apis: Vec<DefId>,
+    lock_ops: HashMap<DefId, bool>,
     program_isr_info: ProgramIsrInfo,
 }
 
@@ -150,6 +193,7 @@ impl<'tcx, 'a> IsrAnalyzer<'tcx, 'a> {
             program_lock_info,
             enable_interrupt_apis: vec![],
             disable_interrupt_apis: vec![],
+            lock_ops: HashMap::new(),
             program_isr_info: ProgramIsrInfo::new(),
         }
     }
@@ -193,14 +237,18 @@ impl<'tcx, 'a> IsrAnalyzer<'tcx, 'a> {
     }
 
     fn collect_interrupt_apis(&mut self) {
-        self.parsed_tags.iter().for_each(|tag_item| {
-            if let LockTagItem::IntrApi(did, is_enable, _is_nested, _) = tag_item {
+        self.parsed_tags.iter().for_each(|tag_item| match tag_item {
+            LockTagItem::IntrApi(did, is_enable, _is_nested, _) => {
                 if *is_enable {
                     self.enable_interrupt_apis.push(*did);
                 } else {
                     self.disable_interrupt_apis.push(*did);
                 }
             }
+            LockTagItem::LockOp(did, _lock_arg, guard_irq_disabled, _) => {
+                self.lock_ops.insert(*did, *guard_irq_disabled);
+            }
+            _ => {}
         });
     }
 
@@ -252,12 +300,15 @@ impl<'tcx, 'a> IsrAnalyzer<'tcx, 'a> {
         }
 
         let body: &Body = self.tcx.optimized_mir(func_def_id);
-        let lockguards = &self.program_lock_info.lockguard_instances;
+        let func_lockmap = self.program_lock_info.lockmap.get(&func_def_id);
+        let empty_lockmap = LocalLockMap::new();
+        let lockmap = func_lockmap.unwrap_or(&empty_lockmap);
         let mut result_cursor = FuncIsrAnalyzer::new(
             self.tcx,
             self.enable_interrupt_apis.clone(),
             self.disable_interrupt_apis.clone(),
-            lockguards,
+            self.lock_ops.clone(),
+            lockmap,
             analyzed_functions,
         )
         .iterate_to_fixpoint(self.tcx, body, None)
@@ -267,15 +318,15 @@ impl<'tcx, 'a> IsrAnalyzer<'tcx, 'a> {
         let mut exit_irq_state = IrqState::new();
         for (bb, _) in body.basic_blocks.iter_enumerated() {
             result_cursor.seek_to_block_start(bb);
-            pre_bb_irq_states.insert(bb, result_cursor.get().clone());
+            pre_bb_irq_states.insert(bb, result_cursor.get().effective_irq_state());
 
             result_cursor.seek_to_block_end(bb);
-            let current_state = result_cursor.get();
+            let current_state = result_cursor.get().effective_irq_state();
 
             let loc = body.terminator_loc(bb);
             let terminator = body.stmt_at(loc).right().unwrap();
             if let TerminatorKind::Return = terminator.kind {
-                exit_irq_state.join(current_state);
+                exit_irq_state = exit_irq_state.union(&current_state);
             }
         }
 

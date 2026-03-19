@@ -15,7 +15,7 @@ use crate::analysis::deadlock::lock_collector::LockCollector;
 use crate::analysis::deadlock::lockset_analyzer::LockSetAnalyzer;
 use crate::analysis::deadlock::tag_parser::{LockTagItem, TagParser};
 use crate::analysis::deadlock::types::{LockDependencyGraph, interrupt::*, lock::*};
-use crate::rtool_info;
+use crate::{rtool_info, rtool_warn};
 use rustc_middle::ty::TyCtxt;
 
 pub struct DeadlockDetector<'tcx> {
@@ -75,6 +75,12 @@ impl<'tcx> DeadlockDetector<'tcx> {
         let mut lock_collector = LockCollector::new(self.tcx, &self.parsed_tags);
         self.program_lock_info = lock_collector.collect();
         lock_collector.print_result();
+        if !self.program_lock_info.missing_lock_op_apis.is_empty() {
+            rtool_warn!(
+                "Deadlock phase: {} guard-returning APIs are still analyzed via legacy fallback because they are missing LockOp tags",
+                self.program_lock_info.missing_lock_op_apis.len()
+            );
+        }
 
         rtool_info!("Deadlock phase: analyze locksets");
         let mut lockset_analyzer = LockSetAnalyzer::new(self.tcx, &self.program_lock_info.lockmap);

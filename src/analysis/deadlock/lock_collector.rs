@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::analysis::deadlock::tag_parser::LockTagItem;
 use crate::analysis::deadlock::types::lock::*;
-use crate::{rtool_debug, rtool_info};
+use crate::{rtool_debug, rtool_info, rtool_warn};
 
 const MAX_LOCK_FIELD_DEPTH: usize = 6;
 
@@ -33,6 +33,14 @@ impl TrackedPlace {
 
 type LocalTrackedPlaceMap = HashMap<Local, HashSet<TrackedPlace>>;
 type ReturnSummaryMap = HashMap<DefId, HashSet<TrackedPlace>>;
+
+#[derive(Debug, Clone)]
+struct LockOpSemantics {
+    lock_arg: usize,
+    irq_semantics: GuardIrqSemantics,
+}
+
+type LockOpSemanticsMap = HashMap<DefId, LockOpSemantics>;
 
 fn first_type_arg<'tcx>(args: GenericArgsRef<'tcx>) -> Option<Ty<'tcx>> {
     args.iter().find_map(|arg| arg.as_type())
@@ -77,9 +85,15 @@ fn ty_may_reach_lock<'tcx>(
         return true;
     }
 
-    let result = adt_def
-        .all_fields()
-        .any(|field| ty_may_reach_lock(tcx, lock_types, field.ty(tcx, args), field_depth + 1, path_stack));
+    let result = adt_def.all_fields().any(|field| {
+        ty_may_reach_lock(
+            tcx,
+            lock_types,
+            field.ty(tcx, args),
+            field_depth + 1,
+            path_stack,
+        )
+    });
     path_stack.remove(&ty);
     result
 }
@@ -302,11 +316,13 @@ struct LockMapBuilder<'a, 'tcx> {
     func_def_id: DefId,
     lock_types: &'a HashSet<AdtDef<'tcx>>,
     lockguard_instances: &'a HashSet<LockGuardInstance>,
+    lock_ops: &'a LockOpSemanticsMap,
     callee_return_summaries: &'a ReturnSummaryMap,
     body: &'tcx Body<'tcx>,
     local_tracked_places: LocalTrackedPlaceMap,
     lockmap: LocalLockMap,
     discovered_lock_instances: HashSet<LockInstance>,
+    missing_lock_op_apis: HashSet<DefId>,
 }
 
 impl<'a, 'tcx> LockMapBuilder<'a, 'tcx> {
@@ -315,6 +331,7 @@ impl<'a, 'tcx> LockMapBuilder<'a, 'tcx> {
         func_def_id: DefId,
         lockguard_instances: &'a HashSet<LockGuardInstance>,
         lock_types: &'a HashSet<AdtDef<'tcx>>,
+        lock_ops: &'a LockOpSemanticsMap,
         callee_return_summaries: &'a ReturnSummaryMap,
     ) -> Self {
         let body = tcx.optimized_mir(func_def_id);
@@ -323,11 +340,13 @@ impl<'a, 'tcx> LockMapBuilder<'a, 'tcx> {
             func_def_id,
             lock_types,
             lockguard_instances,
+            lock_ops,
             callee_return_summaries,
             body,
             local_tracked_places: HashMap::new(),
             lockmap: LocalLockMap::new(),
             discovered_lock_instances: HashSet::new(),
+            missing_lock_op_apis: HashSet::new(),
         }
     }
 
@@ -504,6 +523,24 @@ impl<'a, 'tcx> LockMapBuilder<'a, 'tcx> {
         type_bucket_instances
     }
 
+    fn resolve_lock_instances_from_operand(
+        &mut self,
+        operand: &Operand<'tcx>,
+        span: Span,
+    ) -> HashSet<LockInstance> {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => {
+                self.resolve_lock_instances_from_place(place, span)
+            }
+            Operand::Constant(..) => self
+                .resolve_operand(operand)
+                .into_iter()
+                .map(|tracked_place| tracked_place.to_lock_instance(span))
+                .collect(),
+            Operand::RuntimeChecks(..) => HashSet::new(),
+        }
+    }
+
     fn insert_local_roots(&mut self, local: Local, roots: HashSet<TrackedPlace>) {
         if roots.is_empty() {
             return;
@@ -514,12 +551,23 @@ impl<'a, 'tcx> LockMapBuilder<'a, 'tcx> {
             .extend(roots);
     }
 
-    fn record_guard_locks(&mut self, local: Local, locks: HashSet<LockInstance>) {
+    fn record_guard_locks(
+        &mut self,
+        local: Local,
+        locks: HashSet<LockInstance>,
+        irq_semantics: GuardIrqSemantics,
+    ) {
         if locks.is_empty() {
             return;
         }
         self.discovered_lock_instances.extend(locks.clone());
-        self.lockmap.entry(local).or_default().extend(locks);
+        self.lockmap
+            .entry(local)
+            .or_default()
+            .extend(locks.into_iter().map(|lock| GuardAcquireInfo {
+                lock,
+                irq_semantics: irq_semantics.clone(),
+            }));
     }
 
     fn run(&mut self) {
@@ -531,7 +579,14 @@ impl<'a, 'tcx> LockMapBuilder<'a, 'tcx> {
         });
     }
 
-    pub fn collect(&mut self) -> (LocalLockMap, HashSet<LockInstance>, HashSet<TrackedPlace>) {
+    pub fn collect(
+        &mut self,
+    ) -> (
+        LocalLockMap,
+        HashSet<LockInstance>,
+        HashSet<TrackedPlace>,
+        HashSet<DefId>,
+    ) {
         self.run();
         (
             self.lockmap.clone(),
@@ -540,6 +595,7 @@ impl<'a, 'tcx> LockMapBuilder<'a, 'tcx> {
                 .get(&RETURN_PLACE)
                 .cloned()
                 .unwrap_or_default(),
+            self.missing_lock_op_apis.clone(),
         )
     }
 }
@@ -564,17 +620,36 @@ impl<'a, 'tcx> Visitor<'tcx> for LockMapBuilder<'a, 'tcx> {
             if self.lockguard_instances.iter().any(|guard| {
                 guard.func_def_id == self.func_def_id && guard.local == destination.local
             }) {
-                if let Some(receiver) = args.first() {
-                    match &receiver.node {
-                        Operand::Copy(place) | Operand::Move(place) => {
-                            let locks = self.resolve_lock_instances_from_place(
-                                place,
-                                terminator.source_info.span,
-                            );
-                            self.record_guard_locks(destination.local, locks);
-                        }
-                        Operand::Constant(..) => {}
-                        Operand::RuntimeChecks(..) => {}
+                if let Some(lock_op) = self.lock_ops.get(&callee).cloned() {
+                    if let Some(lock_arg) = args.get(lock_op.lock_arg) {
+                        let locks = self.resolve_lock_instances_from_operand(
+                            &lock_arg.node,
+                            terminator.source_info.span,
+                        );
+                        self.record_guard_locks(
+                            destination.local,
+                            locks,
+                            lock_op.irq_semantics.clone(),
+                        );
+                    } else {
+                        rtool_warn!(
+                            "LockOp argument {} out of range for callee {:?}",
+                            lock_op.lock_arg,
+                            callee
+                        );
+                    }
+                } else {
+                    self.missing_lock_op_apis.insert(callee);
+                    if let Some(receiver) = args.first() {
+                        let locks = self.resolve_lock_instances_from_operand(
+                            &receiver.node,
+                            terminator.source_info.span,
+                        );
+                        self.record_guard_locks(
+                            destination.local,
+                            locks,
+                            GuardIrqSemantics::Unchanged,
+                        );
                     }
                 }
                 return;
@@ -625,9 +700,11 @@ pub struct LockCollector<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     parsed_tags: &'a [LockTagItem],
     lock_types: HashSet<AdtDef<'tcx>>,
+    lock_ops: LockOpSemanticsMap,
     lock_instances: HashSet<LockInstance>,
     lockguard_instances: HashSet<LockGuardInstance>,
     global_lockmap: GlobalLockMap,
+    missing_lock_op_apis: HashSet<DefId>,
 }
 
 impl<'tcx, 'a> LockCollector<'tcx, 'a> {
@@ -636,13 +713,34 @@ impl<'tcx, 'a> LockCollector<'tcx, 'a> {
             tcx,
             parsed_tags,
             lock_types: HashSet::new(),
+            lock_ops: HashMap::new(),
             lock_instances: HashSet::new(),
             lockguard_instances: HashSet::new(),
             global_lockmap: GlobalLockMap::new(),
+            missing_lock_op_apis: HashSet::new(),
         }
     }
 
     fn run(&mut self) {
+        self.lock_ops = self
+            .parsed_tags
+            .iter()
+            .filter_map(|tag| match tag {
+                LockTagItem::LockOp(def_id, lock_arg, guard_irq_disabled, _) => Some((
+                    *def_id,
+                    LockOpSemantics {
+                        lock_arg: *lock_arg,
+                        irq_semantics: if *guard_irq_disabled {
+                            GuardIrqSemantics::DisabledWhileHeld
+                        } else {
+                            GuardIrqSemantics::Unchanged
+                        },
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
+
         for local_def_id in self.tcx.hir_body_owners() {
             let def_id = match self.tcx.hir_body_owner_kind(local_def_id) {
                 BodyOwnerKind::Fn => local_def_id.to_def_id(),
@@ -732,9 +830,11 @@ impl<'tcx, 'a> LockCollector<'tcx, 'a> {
                     *def_id,
                     &self.lockguard_instances,
                     &self.lock_types,
+                    &self.lock_ops,
                     &return_summaries,
                 );
-                let (func_lockmap, discovered_locks, return_summary) = lockmap_builder.collect();
+                let (func_lockmap, discovered_locks, return_summary, missing_lock_ops) =
+                    lockmap_builder.collect();
 
                 if self.global_lockmap.get(def_id) != Some(&func_lockmap) {
                     self.global_lockmap.insert(*def_id, func_lockmap);
@@ -755,6 +855,7 @@ impl<'tcx, 'a> LockCollector<'tcx, 'a> {
                     changed = true;
                     discovered_this_round += new_instance_count;
                 }
+                self.missing_lock_op_apis.extend(missing_lock_ops);
             }
 
             rtool_debug!(
@@ -813,15 +914,23 @@ impl<'tcx, 'a> LockCollector<'tcx, 'a> {
             lock_instances: self.lock_instances.clone(),
             lockguard_instances: self.lockguard_instances.clone(),
             lockmap: self.global_lockmap.clone(),
+            missing_lock_op_apis: self.missing_lock_op_apis.clone(),
         }
     }
 
     pub fn print_result(&self) {
         rtool_info!(
-            "{} Lock Types, {} Lock Instances, {} LockGuard Instances",
+            "{} Lock Types, {} LockOps, {} Lock Instances, {} LockGuard Instances",
             self.lock_types.len(),
+            self.lock_ops.len(),
             self.lock_instances.len(),
             self.lockguard_instances.len(),
-        )
+        );
+        if !self.missing_lock_op_apis.is_empty() {
+            rtool_warn!(
+                "{} guard-returning APIs still rely on legacy fallback because they are missing LockOp tags",
+                self.missing_lock_op_apis.len()
+            );
+        }
     }
 }

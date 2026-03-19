@@ -2,8 +2,8 @@ use petgraph::dot::{Config, Dot};
 use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use rustc_hir::BodyOwnerKind;
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::visit::Visitor;
 use rustc_middle::mir::Body;
+use rustc_middle::mir::visit::Visitor;
 use rustc_middle::ty::TyCtxt;
 use std::collections::{HashMap, HashSet};
 

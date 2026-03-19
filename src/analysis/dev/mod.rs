@@ -29,6 +29,12 @@ pub enum LockTagItem {
         bool, // true = Enable, false = Disable
         bool, // Nested
     ),
+    LockOp(
+        DefId,
+        usize, // LockArg
+        bool,  // GuardIrqDisabled
+        Span,
+    ),
 }
 
 // Helper function: parse format "Name = \"SomeName\""
@@ -155,6 +161,79 @@ fn parse_intr_api(tokens: &TokenStream) -> Option<(bool, bool)> {
     }
 }
 
+fn parse_lock_op(tokens: &TokenStream) -> Option<(usize, bool)> {
+    let mut iter = tokens.iter();
+    let mut lock_arg = None;
+    let mut guard_irq_disabled = None;
+
+    while let Some(tree) = iter.next() {
+        let TokenTree::Token(
+            Token {
+                kind: TokenKind::Ident(sym, _),
+                ..
+            },
+            _,
+        ) = tree
+        else {
+            continue;
+        };
+
+        let key = sym.as_str();
+        let Some(TokenTree::Token(
+            Token {
+                kind: TokenKind::Eq,
+                ..
+            },
+            _,
+        )) = iter.next()
+        else {
+            continue;
+        };
+
+        match key {
+            "LockArg" => {
+                let Some(TokenTree::Token(
+                    Token {
+                        kind: TokenKind::Literal(lit),
+                        ..
+                    },
+                    _,
+                )) = iter.next()
+                else {
+                    return None;
+                };
+                lock_arg = lit.symbol.as_str().parse::<usize>().ok();
+                if lock_arg.is_none() {
+                    return None;
+                }
+            }
+            "GuardIrqDisabled" => {
+                let Some(TokenTree::Token(
+                    Token {
+                        kind: TokenKind::Ident(val_sym, _),
+                        ..
+                    },
+                    _,
+                )) = iter.next()
+                else {
+                    return None;
+                };
+                guard_irq_disabled = match val_sym.as_str() {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => return None,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    match (lock_arg, guard_irq_disabled) {
+        (Some(lock_arg), Some(guard_irq_disabled)) => Some((lock_arg, guard_irq_disabled)),
+        _ => None,
+    }
+}
+
 pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem> {
     match attr {
         Attribute::Parsed(_) => None,
@@ -206,6 +285,18 @@ pub fn extract_locktag_item(did: DefId, attr: &Attribute) -> Option<LockTagItem>
                         }
                     }
                 }
+                "LockOp" => match parse_lock_op(&tokens) {
+                    Some((lock_arg, guard_irq_disabled)) => Some(LockTagItem::LockOp(
+                        did,
+                        lock_arg,
+                        guard_irq_disabled,
+                        attr.span,
+                    )),
+                    None => {
+                        rtool_warn!("Failed to parse LockOp attribute for {:?}", did);
+                        None
+                    }
+                },
                 _ => {
                     rtool_warn!("Unsupported Lock Tag: {}", path[1].as_str());
                     None
