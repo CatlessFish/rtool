@@ -100,11 +100,13 @@ pub fn start_analyzer(tcx: TyCtxt, callback: RtoolCallback) {
                 save_tags,
                 load_tags,
                 no_group,
+                full_edge,
             } => {
                 DeadlockDetector::new(tcx).run_with_tag_io(
                     save_tags.as_deref(),
                     load_tags.as_deref(),
                     *no_group,
+                    *full_edge,
                 );
             }
             AnalysisKind::Dev => {

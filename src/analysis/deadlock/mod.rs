@@ -65,6 +65,7 @@ impl<'tcx> DeadlockDetector<'tcx> {
         save_tags: Option<&str>,
         load_tags: Option<&str>,
         no_group: bool,
+        full_edge: bool,
     ) {
         rtool_info!("Executing Deadlock Detection");
 
@@ -103,8 +104,13 @@ impl<'tcx> DeadlockDetector<'tcx> {
         self.program_isr_info = isr_analyzer.run();
 
         rtool_info!("Deadlock phase: construct dependency graph");
-        let mut ldg_constructor =
-            LDGConstructor::new(self.tcx, &self.program_lock_set, &self.program_isr_info);
+        let mut ldg_constructor = LDGConstructor::new(
+            self.tcx,
+            &self.program_lock_set,
+            &self.program_isr_info,
+            &self.program_lock_info.lockmap,
+            full_edge,
+        );
         ldg_constructor.run();
         self.lock_dependency_graph = ldg_constructor.into_graph();
 

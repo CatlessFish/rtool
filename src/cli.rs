@@ -31,6 +31,9 @@ pub enum AnalysisKind {
         /// list all old/new locksites per lock (no interrupt-site in output); second pass only
         #[arg(long)]
         no_group: bool,
+        /// add call-order lock edges to LDG (enables two-lock cycle detection); extra MIR pass
+        #[arg(long)]
+        full_edge: bool,
     },
     /// print lock tag parsing results for development
     Dev,

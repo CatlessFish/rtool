@@ -2,10 +2,11 @@ use petgraph::dot::{Config, Dot};
 use petgraph::visit::{EdgeRef, IntoNodeReferences};
 use rustc_hir::BodyOwnerKind;
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::Body;
 use rustc_middle::mir::visit::Visitor;
+use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use crate::analysis::deadlock::types::{interrupt::*, lock::*, *};
 use crate::rtool_info;
@@ -99,6 +100,108 @@ impl<'tcx, 'a> Visitor<'tcx> for InterruptEdgeCollector<'tcx, 'a> {
                     location,
                 },
             ));
+        }
+    }
+}
+
+type NormalCallEdgeTriple = (LockSite, LockSite, CallSite);
+
+/// Lock-order edges: at a tagged lock-acquire call, for each other lock MayHold at block entry,
+/// add new_lock -> old_lock (Call) — same pre-BB approximation as interrupt collection.
+struct NormalCallEdgeCollector<'tcx, 'a> {
+    tcx: TyCtxt<'tcx>,
+    func_def_id: DefId,
+    program_lock_set: &'a ProgramLockSet,
+    local_lockmap: &'a LocalLockMap,
+    edges: Vec<NormalCallEdgeTriple>,
+}
+
+impl<'tcx, 'a> NormalCallEdgeCollector<'tcx, 'a> {
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        func_def_id: DefId,
+        program_lock_set: &'a ProgramLockSet,
+        local_lockmap: &'a LocalLockMap,
+    ) -> Self {
+        Self {
+            tcx,
+            func_def_id,
+            program_lock_set,
+            local_lockmap,
+            edges: Vec::new(),
+        }
+    }
+
+    fn collect(mut self) -> Vec<NormalCallEdgeTriple> {
+        let body: &Body = self.tcx.optimized_mir(self.func_def_id);
+        self.visit_body(body);
+        self.edges
+    }
+}
+
+impl<'tcx, 'a> Visitor<'tcx> for NormalCallEdgeCollector<'tcx, 'a> {
+    fn visit_terminator(
+        &mut self,
+        terminator: &rustc_middle::mir::Terminator<'tcx>,
+        location: rustc_middle::mir::Location,
+    ) {
+        let TerminatorKind::Call {
+            func, destination, ..
+        } = &terminator.kind
+        else {
+            return;
+        };
+        if func.const_fn_def().is_none() {
+            return;
+        }
+
+        let Some((_, acquire_set)) = self
+            .local_lockmap
+            .iter()
+            .find(|(local, _)| **local == destination.local)
+        else {
+            return;
+        };
+
+        let callsite_lockset = match self.program_lock_set.get(&self.func_def_id) {
+            Some(func_info) => match func_info.pre_bb_locksets.get(&location.block) {
+                Some(ls) => ls,
+                None => return,
+            },
+            None => return,
+        };
+
+        let call_location = CallSite {
+            caller_def_id: self.func_def_id,
+            location,
+        };
+
+        for acquire_info in acquire_set.iter() {
+            let new_lock = acquire_info.lock.clone();
+            let new_lock_site = LockSite {
+                lock: new_lock.clone(),
+                site: call_location,
+            };
+
+            for (held_lock, state) in callsite_lockset.lock_states.iter() {
+                if *state != LockState::MayHold {
+                    continue;
+                }
+                if *held_lock == new_lock {
+                    continue;
+                }
+                let Some(old_sites) = callsite_lockset.lock_sites.get(held_lock) else {
+                    continue;
+                };
+                for &old_site in old_sites.iter() {
+                    let old_lock_site = LockSite {
+                        lock: held_lock.clone(),
+                        site: old_site,
+                    };
+                    self.edges
+                        .push((new_lock_site.clone(), old_lock_site, call_location));
+                }
+            }
         }
     }
 }
@@ -239,6 +342,8 @@ pub struct LDGConstructor<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     program_lock_set: &'a ProgramLockSet,
     program_isr_info: &'a ProgramIsrInfo,
+    lockmap: &'a GlobalLockMap,
+    full_edge: bool,
     isr_lock_ops_by_lock: HashMap<LockInstance, LockSite>,
     graph: LockDependencyGraph,
 }
@@ -248,17 +353,23 @@ impl<'tcx, 'a> LDGConstructor<'tcx, 'a> {
         tcx: TyCtxt<'tcx>,
         program_lock_set: &'a ProgramLockSet,
         program_isr_info: &'a ProgramIsrInfo,
+        lockmap: &'a GlobalLockMap,
+        full_edge: bool,
     ) -> Self {
         Self {
             tcx,
             program_isr_info,
             program_lock_set,
+            lockmap,
+            full_edge,
             isr_lock_ops_by_lock: collect_isr_lock_ops_by_lock(program_lock_set, program_isr_info),
             graph: LockDependencyGraph::new(),
         }
     }
 
     pub fn run(&mut self) {
+        let intr_timer = self.full_edge.then(Instant::now);
+
         for local_def_id in self.tcx.hir_body_owners() {
             let def_id = match self.tcx.hir_body_owner_kind(local_def_id) {
                 BodyOwnerKind::Fn => local_def_id.to_def_id(),
@@ -277,6 +388,38 @@ impl<'tcx, 'a> LDGConstructor<'tcx, 'a> {
                 self.graph.insert_interrupt_edge(new, old, callsite);
             }
         }
+
+        if !self.full_edge {
+            return;
+        }
+
+        let intr_elapsed = intr_timer.unwrap().elapsed();
+        let t_call = Instant::now();
+        let mut call_edge_count = 0usize;
+        for local_def_id in self.tcx.hir_body_owners() {
+            let def_id = match self.tcx.hir_body_owner_kind(local_def_id) {
+                BodyOwnerKind::Fn => local_def_id.to_def_id(),
+                _ => continue,
+            };
+            let Some(local_map) = self.lockmap.get(&def_id) else {
+                continue;
+            };
+            let call_edges =
+                NormalCallEdgeCollector::new(self.tcx, def_id, self.program_lock_set, local_map)
+                    .collect();
+            call_edge_count += call_edges.len();
+            for (new_site, old_site, call_loc) in call_edges {
+                self.graph
+                    .insert_normal_edge(&new_site, &old_site, &call_loc);
+            }
+        }
+        let call_elapsed = t_call.elapsed();
+        rtool_info!(
+            "Deadlock phase: LDG timing with --full-edge — interrupt-edge pass: {:?}; call-edge pass: {:?} ({} call edges)",
+            intr_elapsed,
+            call_elapsed,
+            call_edge_count
+        );
     }
 
     pub fn print_result(&self) {
