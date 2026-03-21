@@ -28,6 +28,9 @@ pub enum AnalysisKind {
         /// (optional) Load tags from JSON file
         #[arg(long)]
         load_tags: Option<String>,
+        /// list all old/new locksites per lock (no interrupt-site in output); second pass only
+        #[arg(long)]
+        no_group: bool,
     },
     /// print lock tag parsing results for development
     Dev,

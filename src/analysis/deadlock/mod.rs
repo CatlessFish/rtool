@@ -10,7 +10,9 @@ use crate::analysis::callgraph::default::CallGraphAnalyzer;
 use crate::analysis::callgraph::{CallGraph, CallGraphAnalysis};
 use crate::analysis::deadlock::deadlock_reporter::DeadlockReporter;
 use crate::analysis::deadlock::isr_analyzer::IsrAnalyzer;
-use crate::analysis::deadlock::ldg_constructor::LDGConstructor;
+use crate::analysis::deadlock::ldg_constructor::{
+    LDGConstructor, collect_interrupt_locksite_expansion,
+};
 use crate::analysis::deadlock::lock_collector::LockCollector;
 use crate::analysis::deadlock::lockset_analyzer::LockSetAnalyzer;
 use crate::analysis::deadlock::tag_parser::{LockTagItem, TagParser};
@@ -58,7 +60,12 @@ impl<'tcx> DeadlockDetector<'tcx> {
 
     /// Start Interrupt-Aware Deadlock Detection
     /// Note: the detection is currently crate-local
-    pub fn run_with_tag_io(&mut self, save_tags: Option<&str>, load_tags: Option<&str>) {
+    pub fn run_with_tag_io(
+        &mut self,
+        save_tags: Option<&str>,
+        load_tags: Option<&str>,
+        no_group: bool,
+    ) {
         rtool_info!("Executing Deadlock Detection");
 
         rtool_info!("Deadlock phase: build callgraph");
@@ -102,8 +109,17 @@ impl<'tcx> DeadlockDetector<'tcx> {
         self.lock_dependency_graph = ldg_constructor.into_graph();
 
         rtool_info!("Deadlock phase: report cycles");
+        let expansion = if no_group {
+            Some(collect_interrupt_locksite_expansion(
+                self.tcx,
+                &self.program_lock_set,
+                &self.program_isr_info,
+            ))
+        } else {
+            None
+        };
         let mut lock_reporter = DeadlockReporter::new(self.tcx, &self.lock_dependency_graph);
-        lock_reporter.run();
+        lock_reporter.run(no_group, expansion.as_ref());
     }
 }
 

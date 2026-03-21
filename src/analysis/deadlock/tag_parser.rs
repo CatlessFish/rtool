@@ -1,5 +1,6 @@
 use rustc_ast::token::{Token, TokenKind};
 use rustc_ast::tokenstream::{TokenStream, TokenTree};
+use rustc_hir::definitions::DefPathData;
 use rustc_hir::{AttrArgs, Attribute, BodyOwnerKind, def::DefKind, def_id::DefId};
 use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
@@ -7,6 +8,72 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::analysis::utils::def_path::def_path_def_ids;
+
+/// Path segments suitable for [`def_path_def_ids`]: `crate::module::Type::method` without turbofish
+/// (`::<...>`), so splitting on `::` is unambiguous.
+fn def_path_segments_for_resolve(tcx: TyCtxt<'_>, def_id: DefId) -> Vec<String> {
+    let mut segs = vec![tcx.crate_name(def_id.krate).as_str().to_string()];
+    for el in tcx.def_path(def_id).data.iter() {
+        match el.data {
+            DefPathData::TypeNs(name) | DefPathData::ValueNs(name) | DefPathData::MacroNs(name) => {
+                segs.push(name.as_str().to_string());
+            }
+            DefPathData::LifetimeNs(name) | DefPathData::OpaqueLifetime(name) => {
+                segs.push(name.as_str().to_string());
+            }
+            DefPathData::CrateRoot
+            | DefPathData::Ctor
+            | DefPathData::Impl
+            | DefPathData::ForeignMod
+            | DefPathData::Use
+            | DefPathData::GlobalAsm
+            | DefPathData::Closure
+            | DefPathData::AnonConst
+            | DefPathData::LateAnonConst
+            | DefPathData::DesugaredAnonymousLifetime
+            | DefPathData::OpaqueTy
+            | DefPathData::AnonAssocTy(_)
+            | DefPathData::SyntheticCoroutineBody
+            | DefPathData::NestedStatic => {}
+        }
+    }
+    segs
+}
+
+/// Split `a::b::c` on `::` but not turbofish `::<`, so `spin::mutex::Mutex::<T, R>::lock` becomes
+/// four logical segments (third still carries `::<T, R>` for [`normalize_path_segment`]).
+fn split_def_path_skipping_turbofish(path: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    let b = path.as_bytes();
+    while i < b.len() {
+        if i + 1 < b.len() && b[i] == b':' && b[i + 1] == b':' {
+            if i + 2 < b.len() && b[i + 2] == b'<' {
+                i += 2;
+                continue;
+            }
+            out.push(path[start..i].trim());
+            i += 2;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    out.push(path[start..].trim());
+    out.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
+fn normalize_path_segment(seg: &str) -> String {
+    let seg = seg.trim();
+    if let Some(pos) = seg.find("::<") {
+        return seg[..pos].to_string();
+    }
+    if let Some(pos) = seg.find('<') {
+        return seg[..pos].trim_end_matches(':').to_string();
+    }
+    seg.to_string()
+}
 
 pub struct TagParser<'tcx> {
     tcx: TyCtxt<'tcx>,
@@ -41,15 +108,18 @@ impl SerializableDefId {
     pub fn from_def_id(tcx: TyCtxt<'_>, def_id: DefId) -> Self {
         let crate_num = def_id.krate;
         let crate_name = tcx.crate_name(crate_num).as_str().to_string();
+        let segs = def_path_segments_for_resolve(tcx, def_id);
         SerializableDefId {
-            def_path: format!("{}::{}", crate_name, tcx.def_path_str(def_id)),
+            def_path: segs.join("::"),
             crate_name,
         }
     }
 
     pub fn resolve(&self, tcx: TyCtxt<'_>) -> Option<DefId> {
-        let path: Vec<&str> = self.def_path.split("::").collect();
-        def_path_def_ids(&tcx, &path).last()
+        let raw: Vec<&str> = split_def_path_skipping_turbofish(&self.def_path);
+        let normalized: Vec<String> = raw.iter().map(|s| normalize_path_segment(s)).collect();
+        let path_refs: Vec<&str> = normalized.iter().map(|s| s.as_str()).collect();
+        def_path_def_ids(&tcx, &path_refs).last()
     }
 }
 

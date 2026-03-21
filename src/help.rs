@@ -7,6 +7,7 @@ pub const RTOOL_AFTER_HELP: &str = r#"Examples:
   cargo rtool analyze deadlock
   cargo rtool analyze deadlock --save-tags tags.json
   cargo rtool analyze deadlock --load-tags tags.json
+  cargo rtool analyze deadlock --no-group
   cargo rtool analyze dev
   cargo rtool analyze mir --all
   cargo rtool analyze mir --exact crate::path::foo --outpath mir.txt

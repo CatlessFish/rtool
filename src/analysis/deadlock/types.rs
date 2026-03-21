@@ -433,6 +433,15 @@ impl Display for LockSite {
     }
 }
 
+/// Per-lock aggregation of task-side and ISR-side locksites for `--no-group` reporting.
+#[derive(Debug, Default, Clone)]
+pub struct InterruptLocksiteExpansionEntry {
+    pub old_sites: HashSet<CallSite>,
+    pub new_lock_sites: HashSet<LockSite>,
+}
+
+pub type InterruptLocksiteExpansion = HashMap<LockInstance, InterruptLocksiteExpansionEntry>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LockDependencyEdgeType {
     /// Where the interrupt happens

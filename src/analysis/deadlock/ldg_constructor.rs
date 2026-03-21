@@ -103,6 +103,138 @@ impl<'tcx, 'a> Visitor<'tcx> for InterruptEdgeCollector<'tcx, 'a> {
     }
 }
 
+/// All ISR lock operations per lock instance (for expanded reporting / second pass).
+pub fn collect_all_isr_lock_ops_by_lock(
+    program_lock_set: &ProgramLockSet,
+    program_isr_info: &ProgramIsrInfo,
+) -> HashMap<LockInstance, HashSet<LockSite>> {
+    let mut map: HashMap<LockInstance, HashSet<LockSite>> = HashMap::new();
+
+    for isr_def_id in program_isr_info.isr_funcs.iter() {
+        let Some(func_info) = program_lock_set.get(isr_def_id) else {
+            continue;
+        };
+
+        for lock_site in func_info.lock_operations.iter() {
+            map.entry(lock_site.lock.clone())
+                .or_default()
+                .insert(lock_site.clone());
+        }
+    }
+
+    map
+}
+
+struct ExpandedInterruptEdgeCollector<'tcx, 'a> {
+    tcx: TyCtxt<'tcx>,
+    func_def_id: DefId,
+    program_lock_set: &'a ProgramLockSet,
+    program_isr_info: &'a ProgramIsrInfo,
+    isr_lock_ops_by_lock: &'a HashMap<LockInstance, HashSet<LockSite>>,
+    expansion: &'a mut InterruptLocksiteExpansion,
+}
+
+impl<'tcx, 'a> ExpandedInterruptEdgeCollector<'tcx, 'a> {
+    fn new(
+        tcx: TyCtxt<'tcx>,
+        func_def_id: DefId,
+        program_lock_set: &'a ProgramLockSet,
+        program_isr_info: &'a ProgramIsrInfo,
+        isr_lock_ops_by_lock: &'a HashMap<LockInstance, HashSet<LockSite>>,
+        expansion: &'a mut InterruptLocksiteExpansion,
+    ) -> Self {
+        Self {
+            tcx,
+            func_def_id,
+            program_lock_set,
+            program_isr_info,
+            isr_lock_ops_by_lock,
+            expansion,
+        }
+    }
+
+    fn collect(mut self) {
+        let body: &Body = self.tcx.optimized_mir(self.func_def_id);
+        self.visit_body(body);
+    }
+}
+
+impl<'tcx, 'a> Visitor<'tcx> for ExpandedInterruptEdgeCollector<'tcx, 'a> {
+    fn visit_terminator(
+        &mut self,
+        _terminator: &rustc_middle::mir::Terminator<'tcx>,
+        location: rustc_middle::mir::Location,
+    ) {
+        let irq_state = match self.program_isr_info.func_irq_infos.get(&self.func_def_id) {
+            Some(func_info) => func_info.pre_bb_irq_states.get(&location.block).unwrap(),
+            None => return,
+        };
+        if *irq_state == IrqState::MustBeDisabled {
+            return;
+        }
+
+        let callsite_lockset = match self.program_lock_set.get(&self.func_def_id) {
+            Some(func_info) => func_info.pre_bb_locksets.get(&location.block).unwrap(),
+            None => return,
+        };
+
+        for (held_lock, state) in callsite_lockset.lock_states.iter() {
+            if *state != LockState::MayHold {
+                continue;
+            }
+
+            let Some(old_sites) = callsite_lockset.lock_sites.get(held_lock) else {
+                continue;
+            };
+            if old_sites.is_empty() {
+                continue;
+            }
+            let Some(isr_sites) = self.isr_lock_ops_by_lock.get(held_lock) else {
+                continue;
+            };
+            if isr_sites.is_empty() {
+                continue;
+            }
+
+            let entry = self.expansion.entry(held_lock.clone()).or_default();
+            for held_callsite in old_sites.iter().copied() {
+                entry.old_sites.insert(held_callsite);
+            }
+            for new_lock_site in isr_sites.iter().cloned() {
+                entry.new_lock_sites.insert(new_lock_site);
+            }
+        }
+    }
+}
+
+/// Second pass: all task/ISR locksites that can participate in an interrupt self-edge for each lock.
+pub fn collect_interrupt_locksite_expansion<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    program_lock_set: &ProgramLockSet,
+    program_isr_info: &ProgramIsrInfo,
+) -> InterruptLocksiteExpansion {
+    let isr_map = collect_all_isr_lock_ops_by_lock(program_lock_set, program_isr_info);
+    let mut expansion: InterruptLocksiteExpansion = HashMap::new();
+
+    for local_def_id in tcx.hir_body_owners() {
+        let def_id = match tcx.hir_body_owner_kind(local_def_id) {
+            BodyOwnerKind::Fn => local_def_id.to_def_id(),
+            _ => continue,
+        };
+        ExpandedInterruptEdgeCollector::new(
+            tcx,
+            def_id,
+            program_lock_set,
+            program_isr_info,
+            &isr_map,
+            &mut expansion,
+        )
+        .collect();
+    }
+
+    expansion
+}
+
 pub struct LDGConstructor<'tcx, 'a> {
     tcx: TyCtxt<'tcx>,
     program_lock_set: &'a ProgramLockSet,
