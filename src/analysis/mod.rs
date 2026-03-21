@@ -1,3 +1,4 @@
+pub mod callchain;
 pub mod callgraph;
 pub mod deadlock;
 pub mod dev;

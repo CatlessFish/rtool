@@ -46,4 +46,19 @@ pub enum AnalysisKind {
         #[arg(long)]
         outpath: Option<String>,
     },
+    /// query whether a call chain exists
+    Callchain {
+        /// source function name or def_path
+        #[arg(long)]
+        from: String,
+        /// target function name or def_path
+        #[arg(long)]
+        to: String,
+        /// print all matching call chains
+        #[arg(long)]
+        all_paths: bool,
+        /// write call chain output to a file
+        #[arg(long)]
+        outpath: Option<String>,
+    },
 }

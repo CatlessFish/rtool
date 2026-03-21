@@ -10,6 +10,8 @@ pub const RTOOL_AFTER_HELP: &str = r#"Examples:
   cargo rtool analyze dev
   cargo rtool analyze mir --all
   cargo rtool analyze mir --exact crate::path::foo --outpath mir.txt
+  cargo rtool analyze callchain --from crate::path::foo --to crate::path::bar
+  cargo rtool analyze callchain --from foo --to bar --all-paths --outpath callchain.txt
   cargo rtool analyze mir --fuzzy foo -- --tests
 
 Environment Variables (values are case insensitive):

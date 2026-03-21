@@ -34,6 +34,7 @@ use rustc_middle::{ty::TyCtxt, util::Providers};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use analysis::callchain::CallChainAnalyzer;
 use analysis::show_mir::ShowAllMir;
 
 use crate::{
@@ -116,6 +117,14 @@ pub fn start_analyzer(tcx: TyCtxt, callback: RtoolCallback) {
                 } else {
                     FindAndShowMir::new(tcx, exact, fuzzy, outpath.clone()).start();
                 }
+            }
+            AnalysisKind::Callchain {
+                from,
+                to,
+                all_paths,
+                outpath,
+            } => {
+                CallChainAnalyzer::new(tcx, from, to, *all_paths, outpath.clone()).start();
             }
         },
     }
